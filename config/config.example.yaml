@@ -2,29 +2,66 @@ server:
   name: "Home Sendspin"
   id: "home-sendspin"
   sendspin_port: 8927
-  api_host: "0.0.0.0"
-  api_port: 8790
 
-# Group membership is by Sendspin client ID/name. During the first run,
-# /api/v1/clients shows the discovered IDs. Replace the example members.
+mqtt:
+  host: "127.0.0.1"
+  port: 1883
+  username: null
+  password: null
+  base_topic: "sendspin/router"
+  client_id: "sendspin-router"
+
+# Groups are configuration, not Python code.
+# Members can initially be empty. Once clients are discovered, put their
+# Sendspin IDs here or manage membership dynamically via MQTT.
 groups:
   - id: wohnzimmer
-    name: Wohnzimmer
+    name: "Wohnzimmer"
     members: []
     volume: 70
     mute: false
+    stream: null
+
   - id: bad
-    name: Bad
+    name: "Bad"
     members: []
     volume: 60
     mute: false
+    stream: null
+
   - id: schlafzimmer
-    name: Schlafzimmer
+    name: "Schlafzimmer"
     members: []
     volume: 50
     mute: false
+    stream: null
+
+# These are the existing Snapserver PCM FIFOs from the current audio setup.
+# They are deliberately represented as data so more/fewer sources can be
+# added without changing the Python application.
+sources:
+  - id: mopidy
+    name: "Mopidy"
+    uri: "pipe:///run/snapserver/mopidy.pcm?name=Mopidy&sampleformat=48000:16:2&mode=create"
+    sample_rate: 48000
+    channels: 2
+    bit_depth: 16
+
+  - id: spotify
+    name: "Spotify"
+    uri: "pipe:///run/snapserver/spotify.pcm?name=Spotify&sampleformat=48000:16:2&mode=create"
+    sample_rate: 48000
+    channels: 2
+    bit_depth: 16
+
+  - id: chromecast
+    name: "Chromecast"
+    uri: "pipe:///run/snapserver/chromecast.pcm?name=Chromecast&sampleformat=48000:16:2&mode=create"
+    sample_rate: 48000
+    channels: 2
+    bit_depth: 16
 
 router:
-  # active source is only metadata in this first iteration. Producer adapters
-  # will feed PCM into the Sendspin layer in the next iteration.
+  # MVP: one source can be active globally and routed to multiple groups.
+  # Leave null for no active source.
   active_source: null

@@ -4,12 +4,8 @@ import argparse
 import asyncio
 import logging
 
-import uvicorn
-
-from .api import create_app
-from .audio import AudioRouter
+from .app import RouterApp
 from .config import load_config
-from .sendspin_backend import SendspinBackend
 
 
 async def run(config_path: str) -> None:
@@ -18,18 +14,12 @@ async def run(config_path: str) -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    backend = SendspinBackend(config)
-    audio = AudioRouter()
-    await backend.start()
-
-    app = create_app(backend, audio)
-    server = uvicorn.Server(
-        uvicorn.Config(app, host=config.server.api_host, port=config.server.api_port, log_level="info")
-    )
+    app = RouterApp(config)
+    await app.start()
     try:
-        await server.serve()
+        await asyncio.Event().wait()
     finally:
-        await backend.stop()
+        await app.stop()
 
 
 def main() -> None:

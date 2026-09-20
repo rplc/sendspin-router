@@ -1,30 +1,39 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
-@dataclass(slots=True)
+@dataclass
 class ClientInfo:
     client_id: str
     name: str
-    host: str | None = None
-    port: int | None = None
-    available: bool = False
+    available: bool = True
     roles: list[str] = field(default_factory=list)
     group_id: str | None = None
+    volume: int | None = None
+    mute: bool | None = None
+    offset_us: int = 0
+    capabilities: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(slots=True)
+@dataclass
 class GroupState:
     group_id: str
     name: str
     members: list[str] = field(default_factory=list)
-    volume: int = 70
+    volume: int = 100
     mute: bool = False
+    stream: str | None = None
     playback_state: str = "stopped"
 
 
-@dataclass(slots=True)
-class RouterState:
-    active_source: str | None = None
-    target_groups: list[str] = field(default_factory=list)
+@dataclass
+class SourceConfig:
+    source_id: str
+    name: str
+    uri: str
+    sample_rate: int = 48000
+    channels: int = 2
+    bit_depth: int = 16
+    available: bool = False

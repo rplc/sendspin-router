@@ -1,111 +1,142 @@
 # Sendspin Router
 
-Headless Sendspin server/router for a small Raspberry Pi. It is intended to sit between existing audio producers (Mopidy, Spotify, Chromecast capture, etc.) and Sendspin clients such as the Louder ESP32-S3 Plus.
+Headless Sendspin server/router for a Raspberry Pi, intended for an ioBroker-controlled multi-room audio setup.
 
-## Design goal
+## Current target
 
-The first iteration deliberately keeps the architecture small:
+- Raspberry Pi 3B+ / Debian-based OS
+- Python 3.13
+- aiosendspin 9.1.1
+- MQTT for state/events/commands
+- Sendspin clients discovered dynamically via Sendspin/mDNS
+- Configurable groups and PCM pipe sources
+- No GUI
+- No Music Assistant
+
+Python 3.13 is intentional: aiosendspin 9.1.1 explicitly supports Python 3.12 and 3.13.
+
+## Install on the Pi
+
+Recommended development/deployment location for this setup:
 
 ```text
-ioBroker / Lovelace
-        |
-        | HTTP API
-        v
-+-------------------------+
-| sendspin-router         |
-|                         |
-| aiosendspin 9.1.1       |
-| mDNS client discovery   |
-| client/group registry   |
-| audio routing layer     |
-+-------------+-----------+
-              |
-              | Sendspin / mDNS
-              v
-      Louder ESP32 clients
+/home/pi/sendspin-router
 ```
 
-The planned user model is:
-
-- `Wohnzimmer` = several ESP clients
-- `Bad` = one ESP client
-- `Schlafzimmer` = one or more ESP clients
-- one active source can be routed to multiple groups
-- group volume/mute is controlled through the API
-- later: multiple independent sources at the same time
-
-## Important
-
-This is **not** Music Assistant and has no GUI. It is intended to run headless on the Pi 3B+.
-
-The Sendspin protocol and `aiosendspin` are still evolving. Version 9.1.1 is intentionally pinned. The code therefore has a small compatibility layer around aiosendspin instead of scattering library-specific calls throughout the application.
-
-## Installation on the Pi
-
-Python 3.12 is required.
+This avoids needing `sudo` for normal `git pull`, configuration and virtual-environment work.
 
 ```bash
-sudo apt update
-sudo apt install -y python3.12 python3.12-venv python3-pip ffmpeg
+cd ~
+git clone <YOUR_GIT_REPOSITORY_URL> sendspin-router
+cd ~/sendspin-router
 
-git clone <your-git-repository> /opt/sendspin-router
-cd /opt/sendspin-router
-
-python3.12 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.lock
-```
-
-Or install the project itself:
-
-```bash
-python -m pip install .
-```
-
-## Configuration
-
-Copy:
-
-```bash
+python3 --version
+python3 -m venv .venv
+.venv/bin/pip3 install --upgrade pip
+.venv/bin/pip3 install -r requirements.lock
+.venv/bin/pip3 install -e .
 cp config/config.example.yaml config/config.yaml
 ```
 
-Edit the groups and API bind address as required.
+The editable install is important: it creates the `sendspin-router` command inside `.venv/bin`.
 
-## Run
+Test:
 
 ```bash
-. .venv/bin/activate
-sendspin-router --config config/config.yaml
+.venv/bin/sendspin-router --help
 ```
 
-The HTTP API defaults to `http://0.0.0.0:8790`.
+or after activation:
 
-Useful endpoints:
+```bash
+source .venv/bin/activate
+sendspin-router --help
+```
 
-- `GET /api/v1/status`
-- `GET /api/v1/clients`
-- `GET /api/v1/groups`
-- `PUT /api/v1/groups/{group_id}`
-- `POST /api/v1/groups/{group_id}/volume`
-- `POST /api/v1/groups/{group_id}/mute`
-- `POST /api/v1/router/source`
-- `POST /api/v1/router/stop`
+## MQTT
 
-## systemd
+The router uses MQTT as its primary control/state API.
 
-After testing manually:
+Base topic is configurable; default:
+
+```text
+sendspin/router
+```
+
+### Retained state
+
+```text
+sendspin/router/state
+sendspin/router/state/clients
+sendspin/router/state/groups
+sendspin/router/state/sources
+sendspin/router/state/router
+```
+
+Each is retained, so ioBroker receives the current state immediately after subscribing.
+
+### Events
+
+```text
+sendspin/router/event/#
+```
+
+Events are not retained.
+
+### Commands
+
+```text
+sendspin/router/command/group/<group_id>/set_members
+sendspin/router/command/group/<group_id>/set_volume
+sendspin/router/command/group/<group_id>/set_mute
+sendspin/router/command/group/<group_id>/set_stream
+sendspin/router/command/router/set_active_source
+```
+
+Command payloads are JSON.
+
+Examples:
+
+```json
+{"members":["wohnzimmer-1-sendspin","wohnzimmer-2-sendspin"]}
+```
+
+```json
+{"volume":65}
+```
+
+```json
+{"mute":false}
+```
+
+```json
+{"source":"mopidy"}
+```
+
+```json
+{"source":"mopidy","enabled":true}
+```
+
+The exact topic contract is documented in `docs/mqtt-api.md`.
+
+## Systemd
+
+The service file runs the application as user `pi` from `/home/pi/sendspin-router`.
+
+Install:
 
 ```bash
 sudo cp systemd/sendspin-router.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now sendspin-router
+```
+
+Logs:
+
+```bash
 journalctl -u sendspin-router -f
 ```
 
-## Current iteration scope
+## Important
 
-The first package focuses on the server lifecycle, configuration, API, persistent group definitions and Sendspin client registry. The audio producer adapter is deliberately isolated in `audio/` so that Mopidy/Spotify/Chromecast can be connected without changing the Sendspin/control layer.
-
-The exact high-level source/PushStream API is isolated in `sendspin_backend.py`; this avoids baking assumptions about unstable aiosendspin internals into the rest of the project.
+This iteration deliberately keeps the aiosendspin integration isolated in `sendspin_backend.py`. The next implementation step is wiring the configured PCM pipes into aiosendspin PushStreams and applying stream-to-group routing using the concrete 9.1.1 server API.

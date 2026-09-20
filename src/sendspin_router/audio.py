@@ -4,49 +4,48 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from .models import SourceConfig
+
 _LOG = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)
-class AudioSource:
-    source_id: str
-    name: str
-    description: str = ""
+@dataclass
+class SourceRuntime:
+    config: SourceConfig
+    task: asyncio.Task[None] | None = None
 
 
 class AudioRouter:
-    """Producer-independent audio routing facade.
+    """Owns source definitions and the future PCM -> PushStream bridge."""
 
-    Sources are deliberately abstract here. Existing Mopidy/Spotify/HDMI
-    pipelines can stay untouched. The next iteration will attach their PCM
-    output to aiosendspin PushStream(s).
-    """
+    def __init__(self, sources: list[SourceConfig]) -> None:
+        self.sources = {source.source_id: SourceRuntime(source) for source in sources}
 
-    def __init__(self) -> None:
-        self.sources = {
-            "mopidy": AudioSource("mopidy", "Mopidy", "Existing Mopidy output"),
-            "spotify": AudioSource("spotify", "Spotify", "Existing Spotify output"),
-            "chromecast": AudioSource("chromecast", "Chromecast", "Existing HDMI capture output"),
-        }
-        self.active_source: str | None = None
-        self.target_groups: list[str] = []
-
-    async def select(self, source_id: str | None, groups: list[str]) -> dict:
-        if source_id is not None and source_id not in self.sources:
-            raise ValueError(f"Unknown source: {source_id}")
-        self.active_source = source_id
-        self.target_groups = list(dict.fromkeys(groups))
-        _LOG.info("Selected source=%s groups=%s", source_id, self.target_groups)
-        return self.state()
-
-    async def stop(self) -> dict:
-        self.active_source = None
-        self.target_groups = []
-        return self.state()
-
-    def state(self) -> dict:
+    def state(self) -> dict[str, dict]:
         return {
-            "active_source": self.active_source,
-            "target_groups": self.target_groups,
-            "sources": [{"source_id": s.source_id, "name": s.name, "description": s.description} for s in self.sources.values()],
+            source_id: {
+                "id": runtime.config.source_id,
+                "name": runtime.config.name,
+                "uri": runtime.config.uri,
+                "sample_rate": runtime.config.sample_rate,
+                "channels": runtime.config.channels,
+                "bit_depth": runtime.config.bit_depth,
+                "available": runtime.config.available,
+            }
+            for source_id, runtime in self.sources.items()
         }
+
+    async def start(self) -> None:
+        # Pipe handling is deliberately not started yet. This keeps v0.2
+        # focused on the deployment/control plane before we attach the actual
+        # aiosendspin PushStream.
+        _LOG.info("Configured %d audio source(s)", len(self.sources))
+
+    async def stop(self) -> None:
+        for runtime in self.sources.values():
+            if runtime.task:
+                runtime.task.cancel()
+        await asyncio.gather(
+            *(r.task for r in self.sources.values() if r.task),
+            return_exceptions=True,
+        )

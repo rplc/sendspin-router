@@ -1,4 +1,5 @@
+# Development/test lock. Runtime packages are included explicitly.
 -r requirements.lock
-pytest==8.4.2
-pytest-asyncio==1.2.0
+pytest==9.0.1
+pytest-asyncio==1.3.0
 ruff==0.13.1

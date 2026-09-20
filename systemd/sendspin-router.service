@@ -1,21 +1,18 @@
 [Unit]
-Description=Headless Sendspin Router
-After=network-online.target
+Description=Sendspin Router
+After=network-online.target mosquitto.service
 Wants=network-online.target
+RequiresMountsFor=/home/pi/sendspin-router
 
 [Service]
 Type=simple
-User=sendspin
-Group=sendspin
-WorkingDirectory=/opt/sendspin-router
-ExecStart=/opt/sendspin-router/.venv/bin/sendspin-router --config /opt/sendspin-router/config/config.yaml
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/sendspin-router
+ExecStart=/home/pi/sendspin-router/.venv/bin/sendspin-router --config /home/pi/sendspin-router/config/config.yaml
 Restart=on-failure
-RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/opt/sendspin-router/config
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
