@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=75,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sendspin-router"
+version = "0.1.0"
+description = "Headless Sendspin server/router for ioBroker-controlled multi-room audio"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "aiosendspin==9.1.1",
+  "fastapi==0.117.1",
+  "uvicorn[standard]==0.36.0",
+  "pydantic==2.11.9",
+  "pydantic-settings==2.10.1",
+  "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.4.2",
+  "pytest-asyncio==1.2.0",
+  "ruff==0.13.1",
+]
+
+[project.scripts]
+sendspin-router = "sendspin_router.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+'target-version' = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

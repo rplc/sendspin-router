@@ -1,0 +1,7 @@
+# Runtime lock for Raspberry Pi / Debian Bookworm+ / Python 3.12
+aiosendspin==9.1.1
+fastapi==0.117.1
+uvicorn[standard]==0.36.0
+pydantic==2.11.9
+pydantic-settings==2.10.1
+PyYAML==6.0.3

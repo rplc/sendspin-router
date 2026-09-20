@@ -1,0 +1,21 @@
+[Unit]
+Description=Headless Sendspin Router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sendspin
+Group=sendspin
+WorkingDirectory=/opt/sendspin-router
+ExecStart=/opt/sendspin-router/.venv/bin/sendspin-router --config /opt/sendspin-router/config/config.yaml
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/sendspin-router/config
+
+[Install]
+WantedBy=multi-user.target

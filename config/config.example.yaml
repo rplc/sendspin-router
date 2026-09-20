@@ -1,0 +1,30 @@
+server:
+  name: "Home Sendspin"
+  id: "home-sendspin"
+  sendspin_port: 8927
+  api_host: "0.0.0.0"
+  api_port: 8790
+
+# Group membership is by Sendspin client ID/name. During the first run,
+# /api/v1/clients shows the discovered IDs. Replace the example members.
+groups:
+  - id: wohnzimmer
+    name: Wohnzimmer
+    members: []
+    volume: 70
+    mute: false
+  - id: bad
+    name: Bad
+    members: []
+    volume: 60
+    mute: false
+  - id: schlafzimmer
+    name: Schlafzimmer
+    members: []
+    volume: 50
+    mute: false
+
+router:
+  # active source is only metadata in this first iteration. Producer adapters
+  # will feed PCM into the Sendspin layer in the next iteration.
+  active_source: null
