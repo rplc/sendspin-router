@@ -39,13 +39,15 @@ class SendspinConfig:
 
 @dataclass
 class StaticClientConfig:
-    """A headless client (e.g. an ESP "Louder Board") reachable at a known
-    host/port that the router must connect to actively, since it has no GUI
-    to initiate pairing itself."""
+    """A headless client (e.g. an ESP "Louder Board") at a fixed address."""
 
     host: str
     port: int
     group: str | None
+
+    @property
+    def url(self) -> str:
+        return f"ws://{self.host}:{self.port}/sendspin"
 
 
 @dataclass
@@ -108,7 +110,7 @@ def load_config(path: str | Path) -> AppConfig:
     static_clients = [
         StaticClientConfig(
             host=str(item["host"]),
-            port=int(item.get("port", 8927)),
+            port=int(item.get("port", 8928)),
             group=item.get("group"),
         )
         for item in clients_raw.get("static", [])

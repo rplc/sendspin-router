@@ -101,50 +101,39 @@ class SendspinBackend:
     # ------------------------------------------------------------------
 
     async def connect_static_clients(self) -> None:
-        """Actively connect the headless ESP "Louder Board" clients.
+        """Connect configured headless clients by their fixed WebSocket URL.
 
-        These have no GUI/app of their own, so unlike a phone or desktop
-        client they cannot initiate pairing and may not be reliably
-        discoverable via mDNS on every network layout -- the server has to
-        dial out to them by IP instead.
+        ESPHome Sendspin clients listen on port 8928 and expose the
+        ``/sendspin`` WebSocket endpoint.  aiosendspin 9.1.1 expects the
+        complete URL as the first positional argument.
 
-        UNVERIFIED: I could not confirm the exact aiosendspin 9.1.1 method
-        for "connect to a client at a known host/port" from the library's
-        public docs/changelog (the project moves fast and this call isn't
-        documented anywhere I could find). This tries a few plausible method
-        names defensively and logs clearly if none exist, rather than
-        silently doing nothing or crashing. Please run the diagnostic
-        snippet in the README and tell me the actual method + signature so
-        this can be corrected precisely.
+        ``retry_initial_connection`` makes the first attempt retry if the
+        client is not online yet, while ``retry_indefinitely`` keeps the
+        connection task alive across later disconnects.  We start one task
+        per configured client so one offline ESP cannot block the others.
         """
         if self.server is None or not self._static_by_host:
             return
 
-        candidate_methods = ("connect_client", "connect_to_client", "dial_client", "add_static_client")
         for client_cfg in self._static_by_host.values():
-            method = next(
-                (m for name in candidate_methods if (m := getattr(self.server, name, None)) is not None),
-                None,
+            url = client_cfg.url
+            _LOG.info(
+                "Connecting static Sendspin client '%s' (group=%s)",
+                url,
+                client_cfg.group or self._default_group or "unassigned",
             )
-            if method is None:
-                _LOG.warning(
-                    "Don't know how to actively connect to static client %s:%s on this "
-                    "aiosendspin version (tried %s). See README for a diagnostic command.",
-                    client_cfg.host,
-                    client_cfg.port,
-                    ", ".join(candidate_methods),
-                )
-                continue
             try:
-                await method(host=client_cfg.host, port=client_cfg.port)
-            except TypeError:
-                await method(client_cfg.host, client_cfg.port)
-            except Exception:
-                _LOG.exception(
-                    "Failed to connect static client %s:%s", client_cfg.host, client_cfg.port
+                asyncio.create_task(
+                    self.server.connect_to_client(
+                        url,
+                        retry_initial_connection=True,
+                        retry_indefinitely=True,
+                    ),
+                    name=f"sendspin-static-{client_cfg.host}",
                 )
-            else:
-                _LOG.info("Connected static client %s:%s", client_cfg.host, client_cfg.port)
+            except Exception:
+                _LOG.exception("Failed to start connection task for static client %s", url)
+
 
     async def _auto_assign_group(self, client: Any, info: ClientInfo) -> None:
         """Put a newly-seen client into its configured/default group."""

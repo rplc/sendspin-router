@@ -8,7 +8,7 @@ def test_example_config_loads(tmp_path):
 server:
   name: Test
   id: test
-  sendspin_port: 8927
+  sendspin_port: 8928
 mqtt:
   host: 127.0.0.1
   port: 1883
@@ -31,7 +31,7 @@ clients:
   default_group: living
   static:
     - host: "192.168.5.194"
-      port: 8927
+      port: 8928
       group: living
 """,
         encoding="utf-8",
@@ -42,7 +42,7 @@ clients:
     assert config.sources[0].source_id == "mopidy"
     assert config.clients.default_group == "living"
     assert config.clients.static[0].host == "192.168.5.194"
-    assert config.clients.static[0].group == "living"
+    assert config.clients.static[0].group == "living"\n    assert config.clients.static[0].url == "ws://192.168.5.194:8928/sendspin"
 
 
 def test_clients_section_optional(tmp_path):

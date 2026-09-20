@@ -52,15 +52,15 @@ clients:
 
   static:
     - host: "192.168.5.194"
-      port: 8927
+      port: 8928
       group: wohnzimmer
     - host: "192.168.5.217"
-      port: 8927
+      port: 8928
       group: wohnzimmer
     # Add the remaining 3 Wohnzimmer boards, the Bad board and the
     # Schlafzimmer board here once they are flashed, e.g.:
     # - host: "192.168.5.xxx"
-    #   port: 8927
+    #   port: 8928
     #   group: bad
 
 # These are the existing Snapserver PCM FIFOs from the current audio setup.
