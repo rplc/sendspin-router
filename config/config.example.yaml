@@ -14,27 +14,54 @@ mqtt:
 # Groups are configuration, not Python code.
 # Members can initially be empty. Once clients are discovered, put their
 # Sendspin IDs here or manage membership dynamically via MQTT.
+# "stream" pre-assigns a source to a group at startup (e.g. Wohnzimmer+Bad
+# both get Mopidy, Schlafzimmer gets Spotify, all three at the same time).
 groups:
   - id: wohnzimmer
     name: "Wohnzimmer"
     members: []
     volume: 70
     mute: false
-    stream: null
+    stream: spotify
 
   - id: bad
     name: "Bad"
     members: []
     volume: 60
-    mute: false
-    stream: null
+    mute: true
+    stream: spotify
 
   - id: schlafzimmer
     name: "Schlafzimmer"
     members: []
     volume: 50
-    mute: false
-    stream: null
+    mute: true
+    stream: spotify
+
+# Headless ESP "Louder Board" clients have no GUI/app of their own, so they
+# cannot initiate pairing or rely on mDNS the way a phone/desktop client
+# would. The router therefore connects to them actively (outbound, by IP)
+# instead of waiting to be discovered. Once such a client shows up, it is
+# auto-assigned to the "group" listed here; a client not listed here falls
+# back to clients.default_group (if set).
+clients:
+  # Fallback group for any client the router sees that isn't listed under
+  # "static" below (e.g. discovered via mDNS with no explicit mapping yet).
+  # Leave null to require explicit MQTT set_members for unknown clients.
+  default_group: wohnzimmer
+
+  static:
+    - host: "192.168.5.194"
+      port: 8927
+      group: wohnzimmer
+    - host: "192.168.5.217"
+      port: 8927
+      group: wohnzimmer
+    # Add the remaining 3 Wohnzimmer boards, the Bad board and the
+    # Schlafzimmer board here once they are flashed, e.g.:
+    # - host: "192.168.5.xxx"
+    #   port: 8927
+    #   group: bad
 
 # These are the existing Snapserver PCM FIFOs from the current audio setup.
 # They are deliberately represented as data so more/fewer sources can be

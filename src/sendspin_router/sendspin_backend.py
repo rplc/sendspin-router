@@ -12,6 +12,26 @@ from .models import ClientInfo, GroupState
 _LOG = logging.getLogger(__name__)
 
 
+def _client_host(client: Any) -> str | None:
+    """Best-effort extraction of a connected client's remote host/IP.
+
+    aiosendspin does not (as far as I could verify) document a single
+    canonical attribute name for this, so we try a few plausible ones.
+    Used only to match a connected client back to a `clients.static` config
+    entry -- if none of these match on your installed version, static
+    clients still get created/connected, they just won't be auto-matched by
+    IP for group assignment (you can still assign them via MQTT set_members).
+    """
+    for attr in ("remote_address", "remote_ip", "address", "host", "ip"):
+        value = getattr(client, attr, None)
+        if not value:
+            continue
+        if isinstance(value, (tuple, list)) and value:
+            return str(value[0])
+        return str(value)
+    return None
+
+
 class SendspinBackend:
     """Sendspin server integration isolated from the router/control layer."""
 
@@ -22,6 +42,11 @@ class SendspinBackend:
         self.groups: dict[str, GroupState] = {g.group_id: g for g in config.groups}
         self._started = False
         self._unsubscribe_events = None
+        self._static_by_host = {c.host: c for c in config.clients.static}
+        self._default_group = config.clients.default_group
+        # group_id -> whatever aiosendspin object represents "this group's
+        # audio feed" (a PushStream, most likely). See attach_group_audio().
+        self._group_streams: dict[str, Any] = {}
 
     async def start(self) -> None:
         from aiosendspin.noise.keys import Identity
@@ -59,6 +84,8 @@ class SendspinBackend:
         self._started = True
         _LOG.info("Sendspin server started: %s (id=%s)", self.config.server.name, self.server.id)
 
+        await self.connect_static_clients()
+
     async def stop(self) -> None:
         if self.server is None:
             return
@@ -68,6 +95,81 @@ class SendspinBackend:
         await self.server.close()
         self.server = None
         self._started = False
+
+    # ------------------------------------------------------------------
+    # Static (headless) client connection
+    # ------------------------------------------------------------------
+
+    async def connect_static_clients(self) -> None:
+        """Actively connect the headless ESP "Louder Board" clients.
+
+        These have no GUI/app of their own, so unlike a phone or desktop
+        client they cannot initiate pairing and may not be reliably
+        discoverable via mDNS on every network layout -- the server has to
+        dial out to them by IP instead.
+
+        UNVERIFIED: I could not confirm the exact aiosendspin 9.1.1 method
+        for "connect to a client at a known host/port" from the library's
+        public docs/changelog (the project moves fast and this call isn't
+        documented anywhere I could find). This tries a few plausible method
+        names defensively and logs clearly if none exist, rather than
+        silently doing nothing or crashing. Please run the diagnostic
+        snippet in the README and tell me the actual method + signature so
+        this can be corrected precisely.
+        """
+        if self.server is None or not self._static_by_host:
+            return
+
+        candidate_methods = ("connect_client", "connect_to_client", "dial_client", "add_static_client")
+        for client_cfg in self._static_by_host.values():
+            method = next(
+                (m for name in candidate_methods if (m := getattr(self.server, name, None)) is not None),
+                None,
+            )
+            if method is None:
+                _LOG.warning(
+                    "Don't know how to actively connect to static client %s:%s on this "
+                    "aiosendspin version (tried %s). See README for a diagnostic command.",
+                    client_cfg.host,
+                    client_cfg.port,
+                    ", ".join(candidate_methods),
+                )
+                continue
+            try:
+                await method(host=client_cfg.host, port=client_cfg.port)
+            except TypeError:
+                await method(client_cfg.host, client_cfg.port)
+            except Exception:
+                _LOG.exception(
+                    "Failed to connect static client %s:%s", client_cfg.host, client_cfg.port
+                )
+            else:
+                _LOG.info("Connected static client %s:%s", client_cfg.host, client_cfg.port)
+
+    async def _auto_assign_group(self, client: Any, info: ClientInfo) -> None:
+        """Put a newly-seen client into its configured/default group."""
+        host = _client_host(client)
+        static_cfg = self._static_by_host.get(host) if host else None
+        group_id = static_cfg.group if static_cfg else self._default_group
+        if not group_id or group_id not in self.groups:
+            return
+        group = self.groups[group_id]
+        if info.client_id in group.members:
+            return
+        _LOG.info(
+            "Auto-assigning client '%s' (%s) to group '%s'",
+            info.client_id,
+            host or "unknown host",
+            group_id,
+        )
+        try:
+            await self.set_group_members(group_id, [*group.members, info.client_id])
+        except Exception:
+            _LOG.exception("Auto-assign of '%s' to group '%s' failed", info.client_id, group_id)
+
+    # ------------------------------------------------------------------
+    # Client/group bookkeeping
+    # ------------------------------------------------------------------
 
     def _on_event(self, _server: Any, event: Any) -> None:
         cid = getattr(event, "client_id", None)
@@ -99,7 +201,7 @@ class SendspinBackend:
         for client in self.server.clients:
             cid = client.client_id
             previous = self.clients.get(cid)
-            self.clients[cid] = ClientInfo(
+            info = ClientInfo(
                 client_id=cid,
                 name=str(getattr(client, "name", None) or cid),
                 available=bool(getattr(client, "is_connected", False)),
@@ -110,6 +212,9 @@ class SendspinBackend:
                 offset_us=previous.offset_us if previous else 0,
                 capabilities={},
             )
+            self.clients[cid] = info
+            if info.group_id is None:
+                await self._auto_assign_group(client, info)
 
     def status(self) -> dict[str, Any]:
         return {"started": self._started, "clients": len(self.clients), "groups": len(self.groups), "server_id": self.server.id if self.server else None}
@@ -127,6 +232,29 @@ class SendspinBackend:
         for cid in old | set(group.members):
             if cid in self.clients:
                 self.clients[cid].group_id = group_id if cid in group.members else None
+
+        newly_added = set(group.members) - old
+        stream = self._group_streams.get(group_id)
+        if newly_added and stream is not None:
+            await self._join_stream(group_id, stream, newly_added)
+
+    async def _join_stream(self, group_id: str, stream: Any, client_ids: set[str]) -> None:
+        """Attach already-connected clients to a group's running push stream.
+        Shares the same unverified-API caveat as attach_group_audio()."""
+        if self.server is None:
+            return
+        for cid in client_ids:
+            client = self.server.get_client(cid) if hasattr(self.server, "get_client") else None
+            joiner = getattr(stream, "add_client", None) or getattr(client, "join_active_stream", None)
+            if client is None or joiner is None:
+                continue
+            try:
+                if getattr(stream, "add_client", None) is joiner:
+                    await joiner(client)
+                else:
+                    await joiner(stream)
+            except Exception:
+                _LOG.exception("Failed to attach client '%s' to group '%s' stream", cid, group_id)
 
     async def set_group_volume(self, group_id: str, volume: int) -> None:
         self._group(group_id).volume = max(0, min(100, int(volume)))
@@ -149,3 +277,78 @@ class SendspinBackend:
             return self.groups[group_id]
         except KeyError as exc:
             raise ValueError(f"Unknown group: {group_id}") from exc
+
+    # ------------------------------------------------------------------
+    # Audio: feeding PCM into aiosendspin for a specific group
+    # ------------------------------------------------------------------
+    #
+    # UNVERIFIED, same caveat as connect_static_clients(): I could not pin
+    # down the exact 9.1.1 API for "create an audio feed and attach this
+    # group's clients to it" from public docs. The shape below (a per-group
+    # PushStream that group members join, fed via commit_audio()) matches
+    # what aiosendspin's own PR history describes, but names/signatures may
+    # be slightly different on your installed version. Everything here is
+    # wrapped so a wrong guess logs loudly instead of silently losing audio
+    # or crashing the router -- run the router, try `set_stream`, and send
+    # me whatever appears in the logs so this can be corrected exactly.
+
+    async def attach_group_audio(self, group_id: str, source_id: str) -> None:
+        if self.server is None:
+            return
+        source = next((s for s in self.config.sources if s.source_id == source_id), None)
+        if source is None:
+            raise ValueError(f"Unknown source: {source_id}")
+
+        await self.detach_group_audio(group_id)
+
+        create_stream = getattr(self.server, "create_push_stream", None)
+        if create_stream is None:
+            _LOG.warning(
+                "This aiosendspin version has no create_push_stream() -- "
+                "cannot feed PCM to group '%s' yet. See README diagnostic.",
+                group_id,
+            )
+            return
+
+        try:
+            stream = await create_stream(
+                sample_rate=source.sample_rate,
+                channels=source.channels,
+                bit_depth=source.bit_depth,
+            )
+        except Exception:
+            _LOG.exception("Failed to create push stream for group '%s'", group_id)
+            return
+
+        self._group_streams[group_id] = stream
+        await self._join_stream(group_id, stream, set(self.groups[group_id].members))
+        _LOG.info("Group '%s' now streaming source '%s'", group_id, source_id)
+
+    async def detach_group_audio(self, group_id: str) -> None:
+        stream = self._group_streams.pop(group_id, None)
+        if stream is None:
+            return
+        stop = getattr(stream, "stop", None)
+        try:
+            if stop is not None:
+                result = stop()
+                if asyncio.iscoroutine(result):
+                    await result
+        except Exception:
+            _LOG.exception("Failed to stop push stream for group '%s'", group_id)
+
+    async def feed_group(self, group_id: str, pcm_chunk: bytes) -> None:
+        """Called by AudioRouter with raw interleaved PCM bytes for whatever
+        source `group_id` is currently subscribed to."""
+        stream = self._group_streams.get(group_id)
+        if stream is None:
+            return
+        commit = getattr(stream, "commit_audio", None)
+        if commit is None:
+            return
+        try:
+            result = commit(pcm_chunk)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            _LOG.exception("commit_audio() failed for group '%s'", group_id)

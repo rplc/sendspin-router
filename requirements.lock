@@ -4,3 +4,11 @@ aiosendspin[server]==9.1.1
 aiomqtt==2.4.0
 PyYAML==6.0.3
 Pillow==11.3.0
+# Added for the (previously unwired) REST API in api.py -- it already
+# imported these but they were missing here, so `import sendspin_router.api`
+# would have failed. Versions below are current as of this change; if your
+# resolver picks different ones on the Pi that's fine, these aren't
+# version-sensitive for what the router uses.
+fastapi==0.141.1
+pydantic==2.13.5
+uvicorn==0.53.0

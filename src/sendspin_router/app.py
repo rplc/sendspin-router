@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 
 from .audio import AudioRouter
@@ -23,6 +24,15 @@ class RouterApp:
         await self.backend.start()
         await self.audio.start()
         await self.mqtt.start()
+
+        # Apply any stream assignments already present in the YAML config
+        # (e.g. Wohnzimmer+Bad -> Mopidy, Schlafzimmer -> Spotify) so
+        # playback starts routed correctly without needing an MQTT command
+        # first.
+        for group in self.config.groups:
+            if group.stream:
+                await self._route_group_stream(group.group_id, group.stream)
+
         await self.publish_state()
         self._refresh_task = asyncio.create_task(self._refresh_loop(), name="client-refresh")
 
@@ -30,8 +40,8 @@ class RouterApp:
         if self._refresh_task:
             self._refresh_task.cancel()
             await asyncio.gather(self._refresh_task, return_exceptions=True)
-        await self.mqtt.stop()
         await self.audio.stop()
+        await self.mqtt.stop()
         await self.backend.stop()
 
     async def _refresh_loop(self) -> None:
@@ -61,7 +71,7 @@ class RouterApp:
                 elif action == "set_mute":
                     await self.backend.set_group_mute(group_id, payload["mute"])
                 elif action == "set_stream":
-                    await self.backend.set_group_stream(group_id, payload.get("source"))
+                    await self._route_group_stream(group_id, payload.get("source"))
                 else:
                     raise ValueError(f"Unknown group command: {action}")
             else:
@@ -81,6 +91,24 @@ class RouterApp:
             {"command": command},
             retain=False,
         )
+
+    async def _route_group_stream(self, group_id: str, source_id: str | None) -> None:
+        """Update both the control-plane model (backend) and the actual PCM
+        fan-out (audio) for a group's stream assignment.
+
+        This is what makes independent, simultaneous streams per group work:
+        each group gets its own subscription to a source's PCM feed, so
+        Wohnzimmer/Bad can play Mopidy while Schlafzimmer plays Spotify at
+        the same time -- there's no single global "active source" involved.
+        """
+        await self.backend.set_group_stream(group_id, source_id)
+        if source_id is None:
+            await self.audio.unsubscribe(group_id)
+            await self.backend.detach_group_audio(group_id)
+        else:
+            sink = functools.partial(self.backend.feed_group, group_id)
+            await self.audio.subscribe(group_id, source_id, sink)
+            await self.backend.attach_group_audio(group_id, source_id)
 
     async def publish_state(self) -> None:
         await self.mqtt.publish_json(
@@ -102,7 +130,7 @@ class RouterApp:
             "state/router",
             {
                 "active_source": self.config.router.active_source,
-                "version": "0.2.0",
+                "version": "0.3.0",
             },
             retain=True,
         )

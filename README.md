@@ -137,9 +137,59 @@ Logs:
 journalctl -u sendspin-router -f
 ```
 
-## Important
+## Headless clients (ESP "Louder Boards")
 
-This iteration deliberately keeps the aiosendspin integration isolated in `sendspin_backend.py`. The next implementation step is wiring the configured PCM pipes into aiosendspin PushStreams and applying stream-to-group routing using the concrete 9.1.1 server API.
+The ESP Louder Board firmware has no GUI/app, so it can't initiate pairing
+or reliably show up via mDNS the way a phone/desktop client does. List such
+clients under `clients.static` in `config.yaml` (host/port + which group
+they belong to); the router connects to them on startup and auto-assigns
+them to that group as soon as they come online. Anything else the router
+sees falls back to `clients.default_group`, if set.
+
+## Per-group audio routing
+
+Each group has its own `stream` (see `docs/mqtt-api.md` — `set_stream`),
+and each group gets its own independent subscription to a source's PCM feed.
+That means "Wohnzimmer + Bad play Mopidy while Schlafzimmer plays Spotify"
+works out of the box, simultaneously — there's no single global source
+feeding everything. `router.active_source` still exists for the simpler
+"one source, many groups" case, but per-group `stream` is the primary
+mechanism now.
+
+## Important — verify the aiosendspin integration on your Pi
+
+This iteration wires the configured PCM pipes into aiosendspin and applies
+stream-to-group routing, but two pieces of that (in `sendspin_backend.py`,
+each marked `UNVERIFIED` in a docstring) had to be written from the aiosendspin
+9.1.1 source history rather than a stable, documented API — the project
+moves fast enough that I couldn't confirm exact method names/signatures for:
+
+1. `connect_static_clients()` — actively dialing a headless client at a known host/port.
+2. `attach_group_audio()` / `feed_group()` — creating a per-group audio feed and pushing PCM into it.
+
+Both are written defensively (they try a couple of plausible method names and
+log clearly instead of crashing if none match), but they may simply do
+nothing useful until corrected. Please run this on the Pi, inside the venv,
+and send me the output so the calls can be pinned down exactly:
+
+```bash
+.venv/bin/python -c "
+import inspect
+from aiosendspin.server.server import SendspinServer
+from aiosendspin.server.push_stream import PushStream
+for cls in (SendspinServer, PushStream):
+    print(f'--- {cls.__name__} ---')
+    for name, member in inspect.getmembers(cls):
+        if not name.startswith('_') and (inspect.iscoroutinefunction(member) or inspect.isfunction(member)):
+            try:
+                print(name, inspect.signature(member))
+            except (TypeError, ValueError):
+                print(name)
+"
+```
+
+Everything else (config, MQTT, per-group routing model, PCM FIFO reading) is
+regular Python I could write and test directly, and has unit tests in `tests/`.
 
 ### Source URIs
 

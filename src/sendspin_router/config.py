@@ -38,6 +38,23 @@ class SendspinConfig:
 
 
 @dataclass
+class StaticClientConfig:
+    """A headless client (e.g. an ESP "Louder Board") reachable at a known
+    host/port that the router must connect to actively, since it has no GUI
+    to initiate pairing itself."""
+
+    host: str
+    port: int
+    group: str | None
+
+
+@dataclass
+class ClientsConfig:
+    default_group: str | None
+    static: list[StaticClientConfig]
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig
     mqtt: MqttConfig
@@ -45,6 +62,7 @@ class AppConfig:
     sources: list[SourceConfig]
     router: RouterConfig
     sendspin: SendspinConfig
+    clients: ClientsConfig
 
 
 def _require(data: dict[str, Any], key: str) -> Any:
@@ -61,6 +79,7 @@ def load_config(path: str | Path) -> AppConfig:
     mqtt_raw = _require(raw, "mqtt")
     router_raw = raw.get("router", {})
     sendspin_raw = raw.get("sendspin", {})
+    clients_raw = raw.get("clients", {})
 
     groups = [
         GroupState(
@@ -86,6 +105,15 @@ def load_config(path: str | Path) -> AppConfig:
         for item in raw.get("sources", [])
     ]
 
+    static_clients = [
+        StaticClientConfig(
+            host=str(item["host"]),
+            port=int(item.get("port", 8927)),
+            group=item.get("group"),
+        )
+        for item in clients_raw.get("static", [])
+    ]
+
     return AppConfig(
         server=ServerConfig(
             name=str(server_raw.get("name", "Sendspin Router")),
@@ -106,5 +134,9 @@ def load_config(path: str | Path) -> AppConfig:
         sendspin=SendspinConfig(
             identity_file=str(sendspin_raw.get("identity_file", "data/sendspin_identity.key")),
             pairing_store=str(sendspin_raw.get("pairing_store", "data/sendspin_pairings.json")),
+        ),
+        clients=ClientsConfig(
+            default_group=clients_raw.get("default_group"),
+            static=static_clients,
         ),
     )

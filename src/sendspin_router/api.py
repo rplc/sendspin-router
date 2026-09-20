@@ -19,7 +19,7 @@ class SourceSelection(BaseModel):
 
 
 def create_app(backend: SendspinBackend, audio: AudioRouter) -> FastAPI:
-    app = FastAPI(title="Sendspin Router", version="0.1.0")
+    app = FastAPI(title="Sendspin Router", version="0.3.0")
 
     @app.get("/api/v1/status")
     async def status():
