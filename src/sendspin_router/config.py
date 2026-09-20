@@ -108,7 +108,7 @@ def load_config(path: str | Path) -> AppConfig:
     static_clients = [
         StaticClientConfig(
             host=str(item["host"]),
-            port=int(item.get("port", 8927)),
+            port=int(item.get("port", 8928)),
             group=item.get("group"),
         )
         for item in clients_raw.get("static", [])

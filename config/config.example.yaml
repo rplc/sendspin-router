@@ -1,7 +1,7 @@
 server:
   name: "Home Sendspin"
   id: "home-sendspin"
-  sendspin_port: 8928
+  sendspin_port: 8927
 
 mqtt:
   host: "127.0.0.1"

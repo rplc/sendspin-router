@@ -47,6 +47,8 @@ class SendspinBackend:
         # group_id -> whatever aiosendspin object represents "this group's
         # audio feed" (a PushStream, most likely). See attach_group_audio().
         self._group_streams: dict[str, Any] = {}
+        # Logical router group id -> native aiosendspin SendspinGroup.
+        self._native_groups: dict[str, Any] = {}
 
     async def start(self) -> None:
         from aiosendspin.noise.keys import Identity
@@ -148,7 +150,17 @@ class SendspinBackend:
     async def _auto_assign_group(self, client: Any, info: ClientInfo) -> None:
         """Put a newly-seen client into its configured/default group."""
         host = _client_host(client)
-        static_cfg = self._static_by_host.get(host) if host else None
+        static_cfg = None
+        if self.server is not None:
+            url = self.server.get_client_url(info.client_id)
+            if url:
+                static_cfg = next(
+                    (cfg for cfg in self._static_by_host.values()
+                     if url == f"ws://{cfg.host}:{cfg.port}/sendspin"),
+                    None,
+                )
+        if static_cfg is None and host:
+            static_cfg = self._static_by_host.get(host)
         group_id = static_cfg.group if static_cfg else self._default_group
         if not group_id or group_id not in self.groups:
             return
@@ -225,35 +237,66 @@ class SendspinBackend:
         return {gid: vars(group).copy() for gid, group in self.groups.items()}
 
     async def set_group_members(self, group_id: str, members: list[str]) -> None:
+        """Update the logical group and mirror it to aiosendspin's native group."""
         group = self._group(group_id)
+        desired = list(dict.fromkeys(str(x) for x in members))
         old = set(group.members)
-        group.members = list(dict.fromkeys(str(x) for x in members))
-        for cid in old | set(group.members):
-            if cid in self.clients:
-                self.clients[cid].group_id = group_id if cid in group.members else None
 
-        newly_added = set(group.members) - old
-        stream = self._group_streams.get(group_id)
-        if newly_added and stream is not None:
-            await self._join_stream(group_id, stream, newly_added)
-
-    async def _join_stream(self, group_id: str, stream: Any, client_ids: set[str]) -> None:
-        """Attach already-connected clients to a group's running push stream.
-        Shares the same unverified-API caveat as attach_group_audio()."""
         if self.server is None:
+            group.members = desired
             return
-        for cid in client_ids:
-            client = self.server.get_client(cid) if hasattr(self.server, "get_client") else None
-            joiner = getattr(stream, "add_client", None) or getattr(client, "join_active_stream", None)
-            if client is None or joiner is None:
-                continue
-            try:
-                if getattr(stream, "add_client", None) is joiner:
-                    await joiner(client)
-                else:
-                    await joiner(stream)
-            except Exception:
-                _LOG.exception("Failed to attach client '%s' to group '%s' stream", cid, group_id)
+
+        # Capture the old logical assignment before changing it. This matters when
+        # a client is moved from one logical group to another and the destination
+        # has not yet got a native Sendspin group.
+        previous_logical = {
+            cid: (self.clients[cid].group_id if cid in self.clients else None)
+            for cid in desired
+        }
+
+        desired_clients = [self.server.get_client(cid) for cid in desired]
+        desired_clients = [client for client in desired_clients if client is not None]
+
+        group.members = desired
+        for cid in old | set(desired):
+            if cid in self.clients:
+                self.clients[cid].group_id = group_id if cid in desired else None
+
+        if not desired_clients:
+            self._native_groups.pop(group_id, None)
+            if group_id in self._group_streams:
+                await self.detach_group_audio(group_id)
+            return
+
+        native_group = self._native_groups.get(group_id)
+        if native_group is None:
+            # Choose a client that was not already assigned to another logical
+            # group. If every desired client belongs elsewhere, explicitly move
+            # the first one to a fresh solo group and use that as our anchor.
+            anchor = next(
+                (c for c in desired_clients if previous_logical.get(c.client_id) in (None, group_id)),
+                desired_clients[0],
+            )
+            if previous_logical.get(anchor.client_id) not in (None, group_id):
+                await anchor.ungroup()
+            native_group = anchor.group
+            self._native_groups[group_id] = native_group
+
+        # Add desired members. aiosendspin removes each client from its old native
+        # group first and, if this group is already playing, joins its active stream.
+        for client in desired_clients:
+            if client not in native_group.clients:
+                await native_group.add_client(client)
+
+        # Members that left the logical group are placed into fresh Sendspin solo
+        # groups, matching aiosendspin's normal grouping semantics.
+        for cid in old - set(desired):
+            client = self.server.get_client(cid)
+            if client is not None and client in native_group.clients:
+                await client.ungroup()
+
+        if group.stream and group_id not in self._group_streams:
+            await self.attach_group_audio(group_id, group.stream)
 
     async def set_group_volume(self, group_id: str, volume: int) -> None:
         self._group(group_id).volume = max(0, min(100, int(volume)))
@@ -278,18 +321,8 @@ class SendspinBackend:
             raise ValueError(f"Unknown group: {group_id}") from exc
 
     # ------------------------------------------------------------------
-    # Audio: feeding PCM into aiosendspin for a specific group
+    # Audio: feeding PCM into aiosendspin's native SendspinGroup
     # ------------------------------------------------------------------
-    #
-    # UNVERIFIED, same caveat as connect_static_clients(): I could not pin
-    # down the exact 9.1.1 API for "create an audio feed and attach this
-    # group's clients to it" from public docs. The shape below (a per-group
-    # PushStream that group members join, fed via commit_audio()) matches
-    # what aiosendspin's own PR history describes, but names/signatures may
-    # be slightly different on your installed version. Everything here is
-    # wrapped so a wrong guess logs loudly instead of silently losing audio
-    # or crashing the router -- run the router, try `set_stream`, and send
-    # me whatever appears in the logs so this can be corrected exactly.
 
     async def attach_group_audio(self, group_id: str, source_id: str) -> None:
         if self.server is None:
@@ -299,55 +332,63 @@ class SendspinBackend:
             raise ValueError(f"Unknown source: {source_id}")
 
         await self.detach_group_audio(group_id)
-
-        create_stream = getattr(self.server, "create_push_stream", None)
-        if create_stream is None:
-            _LOG.warning(
-                "This aiosendspin version has no create_push_stream() -- "
-                "cannot feed PCM to group '%s' yet. See README diagnostic.",
+        native_group = self._native_groups.get(group_id)
+        if native_group is None or not native_group.clients:
+            _LOG.info(
+                "Group '%s' has no connected/registered Sendspin client yet; "
+                "PushStream will be created when the first client joins",
                 group_id,
             )
             return
 
-        try:
-            stream = await create_stream(
-                sample_rate=source.sample_rate,
-                channels=source.channels,
-                bit_depth=source.bit_depth,
-            )
-        except Exception:
-            _LOG.exception("Failed to create push stream for group '%s'", group_id)
-            return
-
+        stream = native_group.start_stream()
+        # FIFO-backed sources are realtime. This keeps the Sendspin startup lead
+        # at the client's minimum buffer instead of accumulating unnecessary latency.
+        stream.set_live_source(True)
         self._group_streams[group_id] = stream
-        await self._join_stream(group_id, stream, set(self.groups[group_id].members))
-        _LOG.info("Group '%s' now streaming source '%s'", group_id, source_id)
+        _LOG.info(
+            "Group '%s' now streaming source '%s' via native Sendspin group %s",
+            group_id,
+            source_id,
+            native_group.group_id,
+        )
 
     async def detach_group_audio(self, group_id: str) -> None:
         stream = self._group_streams.pop(group_id, None)
         if stream is None:
             return
-        stop = getattr(stream, "stop", None)
         try:
-            if stop is not None:
-                result = stop()
-                if asyncio.iscoroutine(result):
-                    await result
+            stream.stop()
         except Exception:
             _LOG.exception("Failed to stop push stream for group '%s'", group_id)
 
     async def feed_group(self, group_id: str, pcm_chunk: bytes) -> None:
-        """Called by AudioRouter with raw interleaved PCM bytes for whatever
-        source `group_id` is currently subscribed to."""
+        """Prepare one raw PCM chunk and commit it to the group's PushStream."""
         stream = self._group_streams.get(group_id)
-        if stream is None:
+        if stream is None or not pcm_chunk:
             return
-        commit = getattr(stream, "commit_audio", None)
-        if commit is None:
+        group_cfg = self._group(group_id)
+        source_id = group_cfg.stream
+        if source_id is None:
             return
+        source = next((s for s in self.config.sources if s.source_id == source_id), None)
+        if source is None:
+            return
+
         try:
-            result = commit(pcm_chunk)
-            if asyncio.iscoroutine(result):
-                await result
+            from aiosendspin.audio.format import AudioFormat
+
+            audio_format = AudioFormat(
+                sample_rate=source.sample_rate,
+                bit_depth=source.bit_depth,
+                channels=source.channels,
+            )
+            stream.prepare_audio(pcm_chunk, audio_format)
+            await stream.commit_audio()
+            # Keep the live stream close to realtime and avoid building an
+            # unbounded server-side lead if an upstream FIFO bursts.
+            await stream.sleep_to_limit_buffer(500_000)
         except Exception:
-            _LOG.exception("commit_audio() failed for group '%s'", group_id)
+            _LOG.exception("PushStream audio commit failed for group '%s'", group_id)
+
+
