@@ -140,3 +140,11 @@ journalctl -u sendspin-router -f
 ## Important
 
 This iteration deliberately keeps the aiosendspin integration isolated in `sendspin_backend.py`. The next implementation step is wiring the configured PCM pipes into aiosendspin PushStreams and applying stream-to-group routing using the concrete 9.1.1 server API.
+
+### Source URIs
+
+The three configured source URIs are intentionally just the FIFO paths, e.g. `pipe:///run/snapserver/chromecast.pcm`. Sample format is represented separately in YAML, so the Snapserver query parameters are not needed by the router configuration.
+
+### ioBroker
+
+`iobroker/sendspin-router.js` mirrors the retained MQTT state into `0_userdata.0.SendspinRouter.*` and creates writable command states. Room policy is intentionally kept in ioBroker: `GROUP_RULES` maps discovered Sendspin client names/IDs to groups. MQTT state is event-driven; the only small timer is used to discover newly-created command objects inside ioBroker, not to poll the Sendspin router.

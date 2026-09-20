@@ -32,12 +32,19 @@ class RouterConfig:
 
 
 @dataclass
+class SendspinConfig:
+    identity_file: str
+    pairing_store: str
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig
     mqtt: MqttConfig
     groups: list[GroupState]
     sources: list[SourceConfig]
     router: RouterConfig
+    sendspin: SendspinConfig
 
 
 def _require(data: dict[str, Any], key: str) -> Any:
@@ -53,6 +60,7 @@ def load_config(path: str | Path) -> AppConfig:
     server_raw = _require(raw, "server")
     mqtt_raw = _require(raw, "mqtt")
     router_raw = raw.get("router", {})
+    sendspin_raw = raw.get("sendspin", {})
 
     groups = [
         GroupState(
@@ -95,4 +103,8 @@ def load_config(path: str | Path) -> AppConfig:
         groups=groups,
         sources=sources,
         router=RouterConfig(active_source=router_raw.get("active_source")),
+        sendspin=SendspinConfig(
+            identity_file=str(sendspin_raw.get("identity_file", "data/sendspin_identity.key")),
+            pairing_store=str(sendspin_raw.get("pairing_store", "data/sendspin_pairings.json")),
+        ),
     )

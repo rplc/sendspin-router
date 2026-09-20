@@ -42,21 +42,21 @@ groups:
 sources:
   - id: mopidy
     name: "Mopidy"
-    uri: "pipe:///run/snapserver/mopidy.pcm?name=Mopidy&sampleformat=48000:16:2&mode=create"
+    uri: "pipe:///run/snapserver/mopidy.pcm"
     sample_rate: 48000
     channels: 2
     bit_depth: 16
 
   - id: spotify
     name: "Spotify"
-    uri: "pipe:///run/snapserver/spotify.pcm?name=Spotify&sampleformat=48000:16:2&mode=create"
+    uri: "pipe:///run/snapserver/spotify.pcm"
     sample_rate: 48000
     channels: 2
     bit_depth: 16
 
   - id: chromecast
     name: "Chromecast"
-    uri: "pipe:///run/snapserver/chromecast.pcm?name=Chromecast&sampleformat=48000:16:2&mode=create"
+    uri: "pipe:///run/snapserver/chromecast.pcm"
     sample_rate: 48000
     channels: 2
     bit_depth: 16
@@ -65,3 +65,8 @@ router:
   # MVP: one source can be active globally and routed to multiple groups.
   # Leave null for no active source.
   active_source: null
+
+# Persistent Sendspin identity/pairing data.
+sendspin:
+  identity_file: "data/sendspin_identity.key"
+  pairing_store: "data/sendspin_pairings.json"

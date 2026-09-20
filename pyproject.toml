@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Headless Sendspin router for ioBroker-controlled multi-room audio"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-  "aiosendspin==9.1.1",
+  "aiosendspin[server]==9.1.1",
   "aiomqtt==2.4.0",
   "PyYAML==6.0.3",
 ]

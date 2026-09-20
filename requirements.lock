@@ -1,5 +1,6 @@
 # Runtime lock for the Raspberry Pi 3B+ deployment.
 # Python: 3.13.x
-aiosendspin==9.1.1
+aiosendspin[server]==9.1.1
 aiomqtt==2.4.0
 PyYAML==6.0.3
+Pillow==11.3.0
