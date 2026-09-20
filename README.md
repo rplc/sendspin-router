@@ -139,20 +139,12 @@ journalctl -u sendspin-router -f
 
 ## Headless clients (ESP "Louder Boards")
 
-The ESP Louder clients are configured with their fixed IP addresses under
-`clients.static`. Their default Sendspin endpoint is port `8928` and
-`/sendspin`.
-
-The router uses aiosendspin's `connect_to_client(url, ...)` API with
-`retry_initial_connection=true` and `retry_indefinitely=true`. This means
-the router automatically waits for an ESP that is currently offline and
-reconnects it after a network/device restart.
-
-Each static client can specify a default group. Once the client completes
-the Sendspin handshake, the router can assign it to that group.
-
-The router itself continues to listen on port `8927` and advertise as a
-Sendspin server for GUI clients such as Android apps.
+The ESP Louder Board firmware has no GUI/app, so it can't initiate pairing
+or reliably show up via mDNS the way a phone/desktop client does. List such
+clients under `clients.static` in `config.yaml` (host/port + which group
+they belong to); the router connects to them on startup and auto-assigns
+them to that group as soon as they come online. Anything else the router
+sees falls back to `clients.default_group`, if set.
 
 ## Per-group audio routing
 

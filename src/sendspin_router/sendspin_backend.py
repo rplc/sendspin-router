@@ -89,50 +89,60 @@ class SendspinBackend:
     async def stop(self) -> None:
         if self.server is None:
             return
+
         if self._unsubscribe_events:
-            self._unsubscribe_events()
-            self._unsubscribe_events = None
-        await self.server.close()
-        self.server = None
-        self._started = False
+            try:
+                self._unsubscribe_events()
+            except Exception:
+                _LOG.exception("Failed to unsubscribe Sendspin event listener")
+            finally:
+                self._unsubscribe_events = None
+
+        # Stop all group streams before closing the Sendspin server.
+        for group_id in list(self._group_streams):
+            await self.detach_group_audio(group_id)
+
+        try:
+            await self.server.close()
+        except Exception:
+            _LOG.exception("Failed to close Sendspin server cleanly")
+        finally:
+            self.server = None
+            self._started = False
+            self.clients.clear()
+
 
     # ------------------------------------------------------------------
     # Static (headless) client connection
     # ------------------------------------------------------------------
 
     async def connect_static_clients(self) -> None:
-        """Connect configured headless clients by their fixed WebSocket URL.
+        """Connect configured headless clients by their fixed Sendspin URL.
 
-        ESPHome Sendspin clients listen on port 8928 and expose the
-        ``/sendspin`` WebSocket endpoint.  aiosendspin 9.1.1 expects the
-        complete URL as the first positional argument.
-
-        ``retry_initial_connection`` makes the first attempt retry if the
-        client is not online yet, while ``retry_indefinitely`` keeps the
-        connection task alive across later disconnects.  We start one task
-        per configured client so one offline ESP cannot block the others.
+        aiosendspin 9.1.1 exposes ``connect_to_client(url)`` as a regular
+        method that starts the connection internally and returns ``None``.
+        It is therefore deliberately *not* awaited and must not be wrapped
+        in ``asyncio.create_task``.  The library owns the reconnect loop when
+        ``retry_indefinitely`` is enabled.
         """
-        if self.server is None or not self._static_by_host:
+        if self.server is None:
             return
 
         for client_cfg in self._static_by_host.values():
-            url = client_cfg.url
+            url = f"ws://{client_cfg.host}:{client_cfg.port}/sendspin"
             _LOG.info(
                 "Connecting static Sendspin client '%s' (group=%s)",
                 url,
-                client_cfg.group or self._default_group or "unassigned",
+                client_cfg.group or "none",
             )
             try:
-                asyncio.create_task(
-                    self.server.connect_to_client(
-                        url,
-                        retry_initial_connection=True,
-                        retry_indefinitely=True,
-                    ),
-                    name=f"sendspin-static-{client_cfg.host}",
+                self.server.connect_to_client(
+                    url,
+                    retry_initial_connection=True,
+                    retry_indefinitely=True,
                 )
             except Exception:
-                _LOG.exception("Failed to start connection task for static client %s", url)
+                _LOG.exception("Failed to start connection for static client %s", url)
 
 
     async def _auto_assign_group(self, client: Any, info: ClientInfo) -> None:

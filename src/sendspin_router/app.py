@@ -130,7 +130,7 @@ class RouterApp:
             "state/router",
             {
                 "active_source": self.config.router.active_source,
-                "version": "0.3.0",
+                "version": "0.3.2",
             },
             retain=True,
         )
