@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.4
+- Add PCM/PushStream timing diagnostics for troubleshooting realtime playback.
+- Log FIFO chunk size, audio duration, read-to-read interval, sink delivery time,
+  `commit_audio()` duration/result, and `sleep_to_limit_buffer()` duration.
+- Keep the v0.3.3 audio behaviour unchanged; diagnostics are rate-limited to avoid
+  flooding the Pi 3B+ log.
+
+
 ## 0.3.3
 - Use aiosendspin 9.1.1 native `SendspinGroup.start_stream()` / `PushStream` API.
 - Feed configured PCM FIFOs through `prepare_audio()` + `commit_audio()`.

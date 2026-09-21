@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -42,6 +43,9 @@ class _SourceState:
     task: asyncio.Task[None] | None = None
     sinks: dict[str, FrameSink] = field(default_factory=dict)  # group_id -> sink
     available: bool = False
+    diagnostic_chunks: int = 0
+    diagnostic_last_read_finished: float | None = None
+    diagnostic_last_log: float = 0.0
 
 
 class AudioRouter:
@@ -168,14 +172,64 @@ class AudioRouter:
                 _LOG.info("Opened PCM source '%s' (%s)", state.config.source_id, path)
                 try:
                     while True:
+                        read_started = time.perf_counter()
                         chunk = await loop.run_in_executor(None, os.read, fd, chunk_size)
+                        read_finished = time.perf_counter()
                         if not chunk:
                             _LOG.info(
                                 "PCM source '%s' writer closed, reopening",
                                 state.config.source_id,
                             )
                             break
+                        state.diagnostic_chunks += 1
+                        chunk_audio_ms = (
+                            len(chunk) / max(_bytes_per_ms(state.config), 1)
+                        )
+                        read_wait_ms = (
+                            (read_finished - state.diagnostic_last_read_finished) * 1000
+                            if state.diagnostic_last_read_finished is not None
+                            else None
+                        )
+                        read_call_ms = (read_finished - read_started) * 1000
+                        state.diagnostic_last_read_finished = read_finished
+
+                        # Log the first 10 chunks, then once every ~2 seconds.
+                        # This gives us enough timing information without turning
+                        # the Pi's journal into a packet-by-packet trace.
+                        now = time.perf_counter()
+                        if (
+                            state.diagnostic_chunks <= 10
+                            or now - state.diagnostic_last_log >= 2.0
+                        ):
+                            state.diagnostic_last_log = now
+                            wait_text = (
+                                f"{read_wait_ms:.2f} ms"
+                                if read_wait_ms is not None
+                                else "n/a"
+                            )
+                            _LOG.info(
+                                "PCM diag '%s': chunk=%d bytes (%.2f ms audio), "
+                                "read_call=%.2f ms, interval=%.2f ms, sinks=%d",
+                                state.config.source_id,
+                                len(chunk),
+                                chunk_audio_ms,
+                                read_call_ms,
+                                wait_text,
+                                len(state.sinks),
+                            )
+
+                        delivery_started = time.perf_counter()
                         await self._deliver(state, chunk)
+                        delivery_ms = (time.perf_counter() - delivery_started) * 1000
+                        if delivery_ms > max(chunk_audio_ms * 0.75, 5.0):
+                            _LOG.warning(
+                                "PCM diag '%s': sink delivery took %.2f ms for %.2f ms "
+                                "of audio (%d bytes)",
+                                state.config.source_id,
+                                delivery_ms,
+                                chunk_audio_ms,
+                                len(chunk),
+                            )
                 finally:
                     os.close(fd)
                     state.available = False

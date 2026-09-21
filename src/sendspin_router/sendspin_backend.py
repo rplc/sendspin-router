@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,8 @@ class SendspinBackend:
         # group_id -> whatever aiosendspin object represents "this group's
         # audio feed" (a PushStream, most likely). See attach_group_audio().
         self._group_streams: dict[str, Any] = {}
+        self._stream_diag_counts: dict[str, int] = {}
+        self._stream_diag_last_log: dict[str, float] = {}
         # Logical router group id -> native aiosendspin SendspinGroup.
         self._native_groups: dict[str, Any] = {}
 
@@ -355,6 +358,8 @@ class SendspinBackend:
 
     async def detach_group_audio(self, group_id: str) -> None:
         stream = self._group_streams.pop(group_id, None)
+        self._stream_diag_counts.pop(group_id, None)
+        self._stream_diag_last_log.pop(group_id, None)
         if stream is None:
             return
         try:
@@ -383,11 +388,61 @@ class SendspinBackend:
                 bit_depth=source.bit_depth,
                 channels=source.channels,
             )
+            pcm_audio_ms = (
+                len(pcm_chunk)
+                / max(source.sample_rate * source.channels * (source.bit_depth // 8), 1)
+                * 1000
+            )
+            prepare_started = time.perf_counter()
             stream.prepare_audio(pcm_chunk, audio_format)
-            await stream.commit_audio()
+            prepare_ms = (time.perf_counter() - prepare_started) * 1000
+
+            commit_started = time.perf_counter()
+            play_start_us = await stream.commit_audio()
+            commit_ms = (time.perf_counter() - commit_started) * 1000
+
             # Keep the live stream close to realtime and avoid building an
             # unbounded server-side lead if an upstream FIFO bursts.
+            sleep_started = time.perf_counter()
             await stream.sleep_to_limit_buffer(500_000)
+            sleep_ms = (time.perf_counter() - sleep_started) * 1000
+
+            # First few chunks are logged at INFO; afterwards only unusually
+            # expensive operations are logged at WARNING. This is deliberately
+            # rate-light because this code runs once per PCM chunk.
+            diag_count = self._stream_diag_counts.get(group_id, 0) + 1
+            self._stream_diag_counts[group_id] = diag_count
+            last_diag = self._stream_diag_last_log.get(group_id, 0.0)
+            now = time.perf_counter()
+            if diag_count <= 10 or now - last_diag >= 2.0:
+                self._stream_diag_last_log[group_id] = now
+                _LOG.info(
+                    "PushStream diag '%s': chunk=%d bytes (%.2f ms audio), "
+                    "prepare=%.2f ms, commit=%.2f ms, sleep=%.2f ms, "
+                    "play_start_us=%s",
+                    group_id,
+                    len(pcm_chunk),
+                    pcm_audio_ms,
+                    prepare_ms,
+                    commit_ms,
+                    sleep_ms,
+                    play_start_us,
+                )
+
+            if commit_ms > max(pcm_audio_ms * 0.75, 5.0):
+                _LOG.warning(
+                    "PushStream diag '%s': commit_audio took %.2f ms for %.2f ms "
+                    "of PCM audio",
+                    group_id,
+                    commit_ms,
+                    pcm_audio_ms,
+                )
+            if sleep_ms > 100.0:
+                _LOG.warning(
+                    "PushStream diag '%s': sleep_to_limit_buffer waited %.2f ms",
+                    group_id,
+                    sleep_ms,
+                )
         except Exception:
             _LOG.exception("PushStream audio commit failed for group '%s'", group_id)
 
