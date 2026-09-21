@@ -202,10 +202,10 @@ class AudioRouter:
                             or now - state.diagnostic_last_log >= 2.0
                         ):
                             state.diagnostic_last_log = now
-                            wait_text = (
-                                f"{read_wait_ms:.2f} ms"
+                            interval_ms = (
+                                read_wait_ms
                                 if read_wait_ms is not None
-                                else "n/a"
+                                else 0.0
                             )
                             _LOG.info(
                                 "PCM diag '%s': chunk=%d bytes (%.2f ms audio), "
@@ -214,7 +214,7 @@ class AudioRouter:
                                 len(chunk),
                                 chunk_audio_ms,
                                 read_call_ms,
-                                wait_text,
+                                interval_ms,
                                 len(state.sinks),
                             )
 

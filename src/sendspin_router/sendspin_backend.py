@@ -401,11 +401,12 @@ class SendspinBackend:
             play_start_us = await stream.commit_audio()
             commit_ms = (time.perf_counter() - commit_started) * 1000
 
-            # Keep the live stream close to realtime and avoid building an
-            # unbounded server-side lead if an upstream FIFO bursts.
-            sleep_started = time.perf_counter()
-            await stream.sleep_to_limit_buffer(500_000)
-            sleep_ms = (time.perf_counter() - sleep_started) * 1000
+            # Do NOT call sleep_to_limit_buffer() for every live FIFO chunk.
+            # This method intentionally waits until the stream buffer falls
+            # below the requested limit. Calling it after each 6-20 ms PCM
+            # chunk can therefore block the FIFO reader for ~500 ms and makes
+            # the upstream audio stream bursty instead of realtime.
+            sleep_ms = 0.0
 
             # First few chunks are logged at INFO; afterwards only unusually
             # expensive operations are logged at WARNING. This is deliberately
@@ -418,7 +419,7 @@ class SendspinBackend:
                 self._stream_diag_last_log[group_id] = now
                 _LOG.info(
                     "PushStream diag '%s': chunk=%d bytes (%.2f ms audio), "
-                    "prepare=%.2f ms, commit=%.2f ms, sleep=%.2f ms, "
+                    "prepare=%.2f ms, commit=%.2f ms, sleep=%.2f ms (disabled), "
                     "play_start_us=%s",
                     group_id,
                     len(pcm_chunk),
@@ -436,12 +437,6 @@ class SendspinBackend:
                     group_id,
                     commit_ms,
                     pcm_audio_ms,
-                )
-            if sleep_ms > 100.0:
-                _LOG.warning(
-                    "PushStream diag '%s': sleep_to_limit_buffer waited %.2f ms",
-                    group_id,
-                    sleep_ms,
                 )
         except Exception:
             _LOG.exception("PushStream audio commit failed for group '%s'", group_id)

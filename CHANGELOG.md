@@ -1,3 +1,10 @@
+## 0.3.5
+
+- Fix live PCM feeding: do not call `PushStream.sleep_to_limit_buffer()` after every FIFO chunk.
+- Keep the realtime FIFO reader continuously feeding `PushStream`.
+- Fix diagnostic logging of PCM read intervals.
+- Retain the v0.3.4 audio timing diagnostics for `prepare_audio()` and `commit_audio()`.
+
 # Changelog
 
 ## 0.3.4
