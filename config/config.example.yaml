@@ -4,7 +4,7 @@ server:
   sendspin_port: 8927
 
 mqtt:
-  host: "127.0.0.1"
+  host: "192.168.5.212"
   port: 1883
   username: null
   password: null
@@ -57,11 +57,15 @@ clients:
     - host: "192.168.5.217"
       port: 8928
       group: wohnzimmer
-    # Add the remaining 3 Wohnzimmer boards, the Bad board and the
-    # Schlafzimmer board here once they are flashed, e.g.:
-    # - host: "192.168.5.xxx"
-    #   port: 8928
-    #   group: bad
+    - host: "192.168.5.176"
+      port: 8928
+      group: wohnzimmer
+    - host: "192.168.5.137"
+      port: 8928
+      group: bad
+    - host: "192.168.5.145"
+      port: 8928
+      group: schlafzimmer
 
 # These are the existing Snapserver PCM FIFOs from the current audio setup.
 # They are deliberately represented as data so more/fewer sources can be
