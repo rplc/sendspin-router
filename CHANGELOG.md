@@ -1,4 +1,4 @@
-## 0.3.5
+## 0.3.6
 
 - Fix live PCM feeding: do not call `PushStream.sleep_to_limit_buffer()` after every FIFO chunk.
 - Keep the realtime FIFO reader continuously feeding `PushStream`.

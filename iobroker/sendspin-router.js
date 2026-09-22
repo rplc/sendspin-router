@@ -24,14 +24,19 @@ function mqttState(suffix) { return `${MQTT}.${BASE.replaceAll('/', '.')}.${suff
 function publish(topic, payload) {
     sendTo(MQTT, 'sendMessage2Client', { topic, message: JSON.stringify(payload), retain: false });
 }
+function setObjectAsyncCompat(id, obj) {
+    return new Promise((resolve, reject) => {
+        setObject(id, obj, err => err ? reject(err) : resolve());
+    });
+}
 async function channel(id, name) {
-    await setObjectAsync(id, { type: 'channel', common: { name }, native: {} });
+    if (existsObject(id)) return;
+    await setObjectAsyncCompat(id, { type: 'channel', common: { name }, native: {} });
 }
 async function state(id, name, type, role, write = false) {
-    await setObjectAsync(id, {
-        type: 'state',
-        common: { name, type, role, read: true, write, def: type === 'boolean' ? false : type === 'number' ? 0 : '' },
-        native: {}
+    await createStateAsync(id, {
+        name, type, role, read: true, write,
+        def: type === 'boolean' ? false : type === 'number' ? 0 : ''
     });
 }
 async function initBase() {
@@ -44,6 +49,34 @@ function suggestedGroup(c) {
     for (const rule of GROUP_RULES) if (rule.regex.some(r => r.test(text))) return rule.group;
     return null;
 }
+const wiredClientGroups = new Set();
+function watchClientGroup(stateId, clientId) {
+    if (wiredClientGroups.has(stateId)) return;
+    wiredClientGroups.add(stateId);
+    on({ id: stateId, change: 'ne', ack: false }, obj => {
+        const newGroup = obj.state.val ? String(obj.state.val) : '';
+        const oldGroup = obj.oldState && obj.oldState.val ? String(obj.oldState.val) : '';
+        try {
+            if (oldGroup && oldGroup !== newGroup) {
+                const oldMembersState = getState(`${ROOT}.Groups.${safe(oldGroup)}.Members`);
+                const oldMembers = oldMembersState && oldMembersState.val ? JSON.parse(oldMembersState.val) : [];
+                publish(`${BASE}/command/group/${safe(oldGroup)}/set_members`, {
+                    members: oldMembers.filter(id => id !== clientId)
+                });
+            }
+            if (newGroup && newGroup !== oldGroup) {
+                const newMembersState = getState(`${ROOT}.Groups.${safe(newGroup)}.Members`);
+                const newMembers = newMembersState && newMembersState.val ? JSON.parse(newMembersState.val) : [];
+                if (!newMembers.includes(clientId)) newMembers.push(clientId);
+                publish(`${BASE}/command/group/${safe(newGroup)}/set_members`, { members: newMembers });
+            }
+            setStateAsync(obj.id, newGroup, true);
+        } catch (e) {
+            log(`Sendspin client group command ${clientId} failed: ${e}`, 'error');
+        }
+    });
+}
+
 async function mirrorClients(clients) {
     if (!clients || typeof clients !== 'object') return;
     for (const [id, c] of Object.entries(clients)) {
@@ -68,6 +101,7 @@ async function mirrorClients(clients) {
             const g = suggestedGroup({ ...c, id });
             if (g) await setStateAsync(`${base}.Group`, g, false);
         }
+        watchClientGroup(`${base}.Group`, c.id || id);
     }
 }
 async function mirrorGroups(groups) {
@@ -93,6 +127,11 @@ async function mirrorGroups(groups) {
         await setStateAsync(`${base}.Mute`, !!g.mute, true);
         await setStateAsync(`${base}.Stream`, g.stream || '', true);
         await setStateAsync(`${base}.PlaybackState`, g.playback_state || 'stopped', true);
+
+        commandWatcher(`${base}.Command.Volume`, `${BASE}/command/group/${safe(id)}/set_volume`, value => ({ volume: Number(value) }));
+        commandWatcher(`${base}.Command.Mute`, `${BASE}/command/group/${safe(id)}/set_mute`, value => ({ mute: !!value }));
+        commandWatcher(`${base}.Command.Stream`, `${BASE}/command/group/${safe(id)}/set_stream`, value => ({ source: value || null }));
+        commandWatcher(`${base}.Command.Members`, `${BASE}/command/group/${safe(id)}/set_members`, value => ({ members: JSON.parse(value || '[]') }));
     }
 }
 async function mirrorSources(sources) {
@@ -110,7 +149,7 @@ async function mirrorSources(sources) {
         await setStateAsync(`${base}.BitDepth`, Number(s.bit_depth || 0), true);
     }
 }
-async function process(suffix, value) {
+async function handleMqttState(suffix, value) {
     let data; try { data = typeof value === 'string' ? JSON.parse(value) : value; } catch (_) { return; }
     if (suffix === 'state.clients') await mirrorClients(data);
     else if (suffix === 'state.groups') await mirrorGroups(data);
@@ -120,10 +159,16 @@ async function process(suffix, value) {
 
 initBase().catch(e => log(`Sendspin init failed: ${e}`, 'error'));
 
-on({ id: [mqttState('state.clients'), mqttState('state.groups'), mqttState('state.sources'), mqttState('state.router')], change: 'any' }, obj => process(obj.id.substring((MQTT + '.').length).replaceAll('.', '.'), obj.state.val));
+on({ id: [mqttState('state.clients'), mqttState('state.groups'), mqttState('state.sources'), mqttState('state.router')], change: 'any' }, obj => {
+    const suffix = obj.id.substring((MQTT + '.').length);
+    handleMqttState(suffix, obj.state.val).catch(e => log(`Sendspin state mirror failed: ${e}`, 'error'));
+});
 
 // Commands are intentionally separate from mirrored state.
+const wiredCommands = new Set();
 function commandWatcher(id, topic, makePayload) {
+    if (wiredCommands.has(id)) return;
+    wiredCommands.add(id);
     on({ id, change: 'ne', ack: false }, obj => {
         try { publish(topic, makePayload(obj.state.val)); }
         catch (e) { log(`Sendspin command ${id} failed: ${e}`, 'error'); }
@@ -133,22 +178,9 @@ function commandWatcher(id, topic, makePayload) {
 
 (async () => {
     await wait(1500);
+
     on({ id: `${ROOT}.Router.ActiveSource`, change: 'ne', ack: false }, obj => {
         publish(`${BASE}/command/router/set_active_source`, { source: obj.state.val || null });
         setStateAsync(obj.id, obj.state.val, true);
     });
-
-    // Dynamically attach command watchers whenever a new router group appears.
-    const wired = new Set();
-    setInterval(async () => {
-        const result = await getObjectListAsync({ startkey: `${ROOT}.Groups.`, endkey: `${ROOT}.Groups.\u9999` });
-        for (const o of result) {
-            const m = o._id.match(new RegExp(`^${ROOT.replaceAll('.', '\\.')}\\.Groups\\.([^\\.]+)\\.Command\\.(Volume|Mute|Stream|Members)$`));
-            if (!m || wired.has(o._id)) continue;
-            wired.add(o._id);
-            const group = m[1], cmd = m[2];
-            const action = { Volume:'set_volume', Mute:'set_mute', Stream:'set_stream', Members:'set_members' }[cmd];
-            commandWatcher(o._id, `${BASE}/command/group/${group}/${action}`, value => cmd === 'Members' ? { members: JSON.parse(value || '[]') } : cmd === 'Volume' ? { volume: Number(value) } : cmd === 'Mute' ? { mute: !!value } : { source: value || null });
-        }
-    }, 2000);
 })();
