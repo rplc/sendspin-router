@@ -198,3 +198,9 @@ The three configured source URIs are intentionally just the FIFO paths, e.g. `pi
 ### ioBroker
 
 `iobroker/sendspin-router.js` mirrors the retained MQTT state into `0_userdata.0.SendspinRouter.*` and creates writable command states. Room policy is intentionally kept in ioBroker: `GROUP_RULES` maps discovered Sendspin client names/IDs to groups. MQTT state is event-driven; the only small timer is used to discover newly-created command objects inside ioBroker, not to poll the Sendspin router.
+
+# TODO wo/wie weiter:
+- Problem Stream Selecten/Mute/Volume bringt tut aktuell noch gar nichts
+  - im Gegenteil: Ich bekomme Logs, dass setState mehr als 1000 Mal aufgerufen wird -> Endlosschleife
+  - ack Flag berücksichtigen (GUI setzt ack false)
+- Brauchts den active stream im Server und in MQTT überhaupt noch?
