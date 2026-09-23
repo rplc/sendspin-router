@@ -1,11 +1,64 @@
+# Changelog
+
+## 0.4.0
+
+MQTT control API and ioBroker integration reworked.
+
+- Fix: group volume and mute now reach the players (via the Sendspin player
+  group role). Before, they only changed a number in the published state.
+- Fix: retained state is only published when it changed, instead of all
+  four topics every 2 seconds. Together with the new ioBroker script this
+  removes the "setState more than 1000 times per minute" flood that made
+  the javascript adapter stop the script, so no commands were forwarded.
+- Fix: native Sendspin groups are reconciled idempotently. Covers groups
+  whose last client left (stale group/stream kept before, silence after
+  rejoin), clients listed under `groups[].members` in YAML (never grouped
+  natively before), clients moving between groups (stayed listed in the old
+  group) and clients reconnecting.
+- Fix: a client removed from its group no longer gets auto-assigned back to
+  the default group 2 seconds later.
+- Fix: PCM FIFO reader no longer busy-loops while no writer is attached,
+  only delivers whole frames, and never blocks shutdown on an idle writer.
+  `sources.<id>.available` now means "audio is flowing".
+- Fix: all configured PCM FIFOs are drained continuously, also while no
+  group uses the source. Before, an unused source's player (e.g. Mopidy)
+  blocked on the full pipe and did not play at all. Readers run in their own
+  thread pool and survive read errors; a missing FIFO is logged once.
+- Fix: PCM reads are paced to realtime (like Snapserver). Writers faster
+  than realtime (Mopidy `filesink`, radio streams catching up) no longer run
+  ahead of playback or race through playlists while no group listens.
+- Fix: systemd unit no longer depends on a local `mosquitto.service`; the
+  broker is remote and the router reconnects on its own. `TimeoutStopSec=15`.
+- Fix: MQTT reconnects automatically (broker restart no longer requires a
+  router restart); new retained `availability` topic with last will.
+- Fix: commands and the periodic refresh are serialized, payloads are
+  validated (`"mute":"false"` no longer means `true`), retained commands
+  are ignored.
+- New: `command/client/<id>/set_group|set_volume|set_mute`.
+- New: real `playback_state`, live client/group volume and mute in state.
+- New: config validation at startup (unknown stream/group references,
+  duplicate ids, clients in several groups).
+- Removed: `router.active_source`, `command/router/set_active_source` and
+  `state/router.active_source`. They never affected audio.
+- Removed: unused FastAPI REST API (`api.py`, never started, already broken)
+  and its dependencies.
+- Removed from state: `offset_us` and `capabilities` (always 0 / empty).
+- State JSON uses `id` for clients and groups, as documented.
+- ioBroker script rewritten: one writable state per control with proper
+  ack handling, writes only on change, serialized processing, command
+  errors logged, legacy objects cleaned up.
+- ioBroker: `Assign.Client` / `Assign.Group` selects for moving clients
+  between groups from Lovelace. `GROUP_RULES` no longer undo a manual
+  "no group" assignment.
+- ioBroker: daily job deletes objects of clients the router has not
+  reported for 24 h.
+
 ## 0.3.6
 
 - Fix live PCM feeding: do not call `PushStream.sleep_to_limit_buffer()` after every FIFO chunk.
 - Keep the realtime FIFO reader continuously feeding `PushStream`.
 - Fix diagnostic logging of PCM read intervals.
 - Retain the v0.3.4 audio timing diagnostics for `prepare_audio()` and `commit_audio()`.
-
-# Changelog
 
 ## 0.3.4
 - Add PCM/PushStream timing diagnostics for troubleshooting realtime playback.

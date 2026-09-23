@@ -55,69 +55,26 @@ sendspin-router --help
 
 ## MQTT
 
-The router uses MQTT as its primary control/state API.
+The router uses MQTT as its only control/state API. Base topic is
+configurable; default `sendspin/router`.
 
-Base topic is configurable; default:
-
-```text
-sendspin/router
-```
-
-### Retained state
-
-```text
-sendspin/router/state
-sendspin/router/state/clients
-sendspin/router/state/groups
-sendspin/router/state/sources
-sendspin/router/state/router
-```
-
-Each is retained, so ioBroker receives the current state immediately after subscribing.
-
-### Events
-
-```text
-sendspin/router/event/#
-```
-
-Events are not retained.
-
-### Commands
-
-```text
-sendspin/router/command/group/<group_id>/set_members
-sendspin/router/command/group/<group_id>/set_volume
-sendspin/router/command/group/<group_id>/set_mute
-sendspin/router/command/group/<group_id>/set_stream
-sendspin/router/command/router/set_active_source
-```
-
-Command payloads are JSON.
+- `state/clients`, `state/groups`, `state/sources`, `state/router`:
+  retained JSON, published only on change.
+- `availability`: retained `online`/`offline` (MQTT last will).
+- `event/command_applied`, `event/command_error`: one per command.
+- `command/group/<group_id>/set_members|set_volume|set_mute|set_stream`
+- `command/client/<client_id>/set_group|set_volume|set_mute`
 
 Examples:
 
-```json
-{"members":["wohnzimmer-1-sendspin","wohnzimmer-2-sendspin"]}
+```text
+sendspin/router/command/group/wohnzimmer/set_stream   {"source":"mopidy"}
+sendspin/router/command/group/wohnzimmer/set_volume   {"volume":65}
+sendspin/router/command/client/bad-1/set_group        {"group":"wohnzimmer"}
 ```
 
-```json
-{"volume":65}
-```
-
-```json
-{"mute":false}
-```
-
-```json
-{"source":"mopidy"}
-```
-
-```json
-{"source":"mopidy","enabled":true}
-```
-
-The exact topic contract is documented in `docs/mqtt-api.md`.
+The router reconnects to the broker automatically, so restarting ioBroker
+does not interrupt audio. The full contract is in `docs/mqtt-api.md`.
 
 ## Systemd
 
@@ -152,44 +109,18 @@ Each group has its own `stream` (see `docs/mqtt-api.md` — `set_stream`),
 and each group gets its own independent subscription to a source's PCM feed.
 That means "Wohnzimmer + Bad play Mopidy while Schlafzimmer plays Spotify"
 works out of the box, simultaneously — there's no single global source
-feeding everything. `router.active_source` still exists for the simpler
-"one source, many groups" case, but per-group `stream` is the primary
-mechanism now.
+feeding everything.
 
-## Important — verify the aiosendspin integration on your Pi
+The router reads every configured FIFO continuously, even while no group
+plays that source, and discards the unused audio, just like Snapserver did.
+Without that, a player such as Mopidy blocks as soon as its FIFO is full and
+appears to not play at all.
 
-This iteration wires the configured PCM pipes into aiosendspin and applies
-stream-to-group routing, but two pieces of that (in `sendspin_backend.py`,
-each marked `UNVERIFIED` in a docstring) had to be written from the aiosendspin
-9.1.1 source history rather than a stable, documented API — the project
-moves fast enough that I couldn't confirm exact method names/signatures for:
-
-1. `connect_static_clients()` — actively dialing a headless client at a known host/port.
-2. `attach_group_audio()` / `feed_group()` — creating a per-group audio feed and pushing PCM into it.
-
-Both are written defensively (they try a couple of plausible method names and
-log clearly instead of crashing if none match), but they may simply do
-nothing useful until corrected. Please run this on the Pi, inside the venv,
-and send me the output so the calls can be pinned down exactly:
-
-```bash
-.venv/bin/python -c "
-import inspect
-from aiosendspin.server.server import SendspinServer
-from aiosendspin.server.push_stream import PushStream
-for cls in (SendspinServer, PushStream):
-    print(f'--- {cls.__name__} ---')
-    for name, member in inspect.getmembers(cls):
-        if not name.startswith('_') and (inspect.iscoroutinefunction(member) or inspect.isfunction(member)):
-            try:
-                print(name, inspect.signature(member))
-            except (TypeError, ValueError):
-                print(name)
-"
-```
-
-Everything else (config, MQTT, per-group routing model, PCM FIFO reading) is
-regular Python I could write and test directly, and has unit tests in `tests/`.
+Reads are paced to realtime (at most 0.2 s ahead of the audio clock). Players
+that write faster than realtime, e.g. Mopidy's GStreamer `filesink` or a radio
+stream catching up after a network stall, are throttled by the full pipe, so
+they can neither race through a playlist nor fill the Sendspin buffer far
+ahead of playback.
 
 ### Source URIs
 
@@ -197,10 +128,43 @@ The three configured source URIs are intentionally just the FIFO paths, e.g. `pi
 
 ### ioBroker
 
-`iobroker/sendspin-router.js` mirrors the retained MQTT state into `0_userdata.0.SendspinRouter.*` and creates writable command states. Room policy is intentionally kept in ioBroker: `GROUP_RULES` maps discovered Sendspin client names/IDs to groups. MQTT state is event-driven; the only small timer is used to discover newly-created command objects inside ioBroker, not to poll the Sendspin router.
+`iobroker/sendspin-router.js` is a script for the ioBroker javascript
+adapter. The MQTT adapter instance (`mqtt.0`) must subscribe to
+`sendspin/router/#`.
 
-# TODO wo/wie weiter:
-- Problem Stream Selecten/Mute/Volume bringt tut aktuell noch gar nichts
-  - im Gegenteil: Ich bekomme Logs, dass setState mehr als 1000 Mal aufgerufen wird -> Endlosschleife
-  - ack Flag berücksichtigen (GUI setzt ack false)
-- Brauchts den active stream im Server und in MQTT überhaupt noch?
+The script mirrors the router state into `0_userdata.0.SendspinRouter.*`.
+Every control is a single writable state following the ioBroker ack
+convention: a write with `ack=false` (GUI, Lovelace, other scripts) is sent
+to the router as a command. The router's confirmation comes back as the same
+state with `ack=true`.
+
+| State | Lovelace entity | Command |
+| --- | --- | --- |
+| `Groups.<g>.Stream` | `input_select` | `set_stream` (`off` = no source) |
+| `Groups.<g>.Volume` | `input_number` | `set_volume` |
+| `Groups.<g>.Mute` | `input_boolean` | `set_mute` |
+| `Groups.<g>.Members` | | `set_members` (JSON array) |
+| `Clients.<c>.Group` | | `set_group` (empty = none) |
+| `Clients.<c>.Volume` / `.Mute` | | per-player volume/mute |
+| `Assign.Client` | `input_select` | picks a client, labelled "Name (Gruppe)" |
+| `Assign.Group` | `input_select` | moves the picked client (`none` = no group) |
+
+To move a client in Lovelace, pick it in `Assign.Client`. `Assign.Group`
+then shows its current group. Picking another group moves the client at
+once. Both selects stay set, so the confirmed result is visible: the client
+label and the group select update when the router confirms. Both lists
+follow the router's clients and groups automatically.
+
+The router publishes only changes, and the script writes only states whose
+value changed. The only periodic task is a daily job (04:17) that deletes
+`Clients.<c>` objects of clients the router has not reported for at least
+24 hours (`CLIENT_CLEANUP_AFTER_HOURS`, `CLIENT_CLEANUP_CRON`). It does
+nothing while the router is offline, and a client that comes back is simply
+recreated. On first start the script
+deletes the objects of older script versions (`Groups.<g>.Command.*`,
+`Router.ActiveSource`, ...), so the Lovelace entity names move to the new
+states. Set `CLEANUP_LEGACY_OBJECTS = false` to keep them.
+
+Group assignment happens in the router: `clients.static[].group` first, then
+`clients.default_group`. The script's `GROUP_RULES` only apply to clients the
+router left unassigned and that were never assigned manually.

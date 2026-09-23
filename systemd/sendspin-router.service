@@ -1,6 +1,8 @@
 [Unit]
 Description=Sendspin Router
-After=network-online.target mosquitto.service
+# The MQTT broker (ioBroker) runs on another host. The router reconnects to
+# it on its own, so only the network is required, not a local broker.
+After=network-online.target
 Wants=network-online.target
 RequiresMountsFor=/home/pi/sendspin-router
 
@@ -12,6 +14,8 @@ WorkingDirectory=/home/pi/sendspin-router
 ExecStart=/home/pi/sendspin-router/.venv/bin/sendspin-router --config /home/pi/sendspin-router/config/config.yaml
 Restart=on-failure
 RestartSec=5
+# Shutdown needs well under a second; don't wait the default 90 s if it hangs.
+TimeoutStopSec=15
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

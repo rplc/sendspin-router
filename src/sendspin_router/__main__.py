@@ -4,16 +4,17 @@ import argparse
 import asyncio
 import logging
 
+from . import __version__
 from .app import RouterApp
 from .config import load_config
 
 
 async def run(config_path: str) -> None:
-    config = load_config(config_path)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    config = load_config(config_path)
     app = RouterApp(config)
     await app.start()
     try:
@@ -25,6 +26,7 @@ async def run(config_path: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Headless Sendspin router")
     parser.add_argument("--config", default="config/config.yaml")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args()
     try:
         asyncio.run(run(args.config))

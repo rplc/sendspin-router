@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,8 @@ from typing import Any
 import yaml
 
 from .models import GroupState, SourceConfig
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -24,11 +27,6 @@ class MqttConfig:
     password: str | None
     base_topic: str
     client_id: str
-
-
-@dataclass
-class RouterConfig:
-    active_source: str | None
 
 
 @dataclass
@@ -60,7 +58,6 @@ class AppConfig:
     mqtt: MqttConfig
     groups: list[GroupState]
     sources: list[SourceConfig]
-    router: RouterConfig
     sendspin: SendspinConfig
     clients: ClientsConfig
 
@@ -77,20 +74,24 @@ def load_config(path: str | Path) -> AppConfig:
 
     server_raw = _require(raw, "server")
     mqtt_raw = _require(raw, "mqtt")
-    router_raw = raw.get("router", {})
-    sendspin_raw = raw.get("sendspin", {})
-    clients_raw = raw.get("clients", {})
+    if (raw.get("router") or {}).get("active_source") is not None:
+        _LOG.warning(
+            "router.active_source is no longer supported and is ignored; "
+            "use the per-group 'stream' setting instead"
+        )
+    sendspin_raw = raw.get("sendspin") or {}
+    clients_raw = raw.get("clients") or {}
 
     groups = [
         GroupState(
             group_id=str(item["id"]),
             name=str(item.get("name", item["id"])),
-            members=list(item.get("members", [])),
+            members=[str(m) for m in item.get("members") or []],
             volume=int(item.get("volume", 100)),
             mute=bool(item.get("mute", False)),
             stream=item.get("stream"),
         )
-        for item in raw.get("groups", [])
+        for item in raw.get("groups") or []
     ]
 
     sources = [
@@ -102,7 +103,7 @@ def load_config(path: str | Path) -> AppConfig:
             channels=int(item.get("channels", 2)),
             bit_depth=int(item.get("bit_depth", 16)),
         )
-        for item in raw.get("sources", [])
+        for item in raw.get("sources") or []
     ]
 
     static_clients = [
@@ -111,10 +112,10 @@ def load_config(path: str | Path) -> AppConfig:
             port=int(item.get("port", 8928)),
             group=item.get("group"),
         )
-        for item in clients_raw.get("static", [])
+        for item in clients_raw.get("static") or []
     ]
 
-    return AppConfig(
+    config = AppConfig(
         server=ServerConfig(
             name=str(server_raw.get("name", "Sendspin Router")),
             server_id=str(server_raw.get("id", "sendspin-router")),
@@ -130,7 +131,6 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         groups=groups,
         sources=sources,
-        router=RouterConfig(active_source=router_raw.get("active_source")),
         sendspin=SendspinConfig(
             identity_file=str(sendspin_raw.get("identity_file", "data/sendspin_identity.key")),
             pairing_store=str(sendspin_raw.get("pairing_store", "data/sendspin_pairings.json")),
@@ -140,3 +140,37 @@ def load_config(path: str | Path) -> AppConfig:
             static=static_clients,
         ),
     )
+    _validate(config)
+    return config
+
+
+def _validate(config: AppConfig) -> None:
+    """Fail fast on references that would otherwise only break at runtime."""
+    source_ids = [s.source_id for s in config.sources]
+    group_ids = [g.group_id for g in config.groups]
+    for kind, ids in (("source", source_ids), ("group", group_ids)):
+        duplicates = {i for i in ids if ids.count(i) > 1}
+        if duplicates:
+            raise ValueError(f"Duplicate {kind} id(s): {', '.join(sorted(duplicates))}")
+
+    for group in config.groups:
+        if group.stream is not None and group.stream not in source_ids:
+            raise ValueError(f"Group '{group.group_id}' uses unknown stream '{group.stream}'")
+        if not 0 <= group.volume <= 100:
+            raise ValueError(f"Group '{group.group_id}' volume must be 0..100")
+
+    seen: dict[str, str] = {}
+    for group in config.groups:
+        for member in group.members:
+            if member in seen:
+                raise ValueError(
+                    f"Client '{member}' is listed in groups '{seen[member]}' and "
+                    f"'{group.group_id}'; a client can only belong to one group"
+                )
+            seen[member] = group.group_id
+
+    if config.clients.default_group and config.clients.default_group not in group_ids:
+        raise ValueError(f"clients.default_group '{config.clients.default_group}' is unknown")
+    for static in config.clients.static:
+        if static.group and static.group not in group_ids:
+            raise ValueError(f"Static client {static.host} uses unknown group '{static.group}'")

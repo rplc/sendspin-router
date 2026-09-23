@@ -13,9 +13,13 @@ mqtt:
 
 # Groups are configuration, not Python code.
 # Members can initially be empty. Once clients are discovered, put their
-# Sendspin IDs here or manage membership dynamically via MQTT.
+# Sendspin IDs here or manage membership dynamically via MQTT. A client can
+# only be listed in one group.
 # "stream" pre-assigns a source to a group at startup (e.g. Wohnzimmer+Bad
 # both get Mopidy, Schlafzimmer gets Spotify, all three at the same time).
+# "volume"/"mute" are only the values reported until players are connected;
+# afterwards the players' real volume is reported. They are not pushed to the
+# players on startup.
 groups:
   - id: wohnzimmer
     name: "Wohnzimmer"
@@ -91,11 +95,6 @@ sources:
     sample_rate: 48000
     channels: 2
     bit_depth: 16
-
-router:
-  # MVP: one source can be active globally and routed to multiple groups.
-  # Leave null for no active source.
-  active_source: null
 
 # Persistent Sendspin identity/pairing data.
 sendspin:

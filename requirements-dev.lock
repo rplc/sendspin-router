@@ -3,6 +3,3 @@
 pytest==9.0.1
 pytest-asyncio==1.3.0
 ruff==0.13.1
-# Needed for fastapi.testclient.TestClient (tests/test_api.py) with modern
-# starlette.
-httpx2

@@ -1,3 +1,5 @@
+import pytest
+
 from sendspin_router.config import load_config
 
 
@@ -65,3 +67,40 @@ mqtt:
     config = load_config(path)
     assert config.clients.default_group is None
     assert config.clients.static == []
+
+
+_BASE = """
+server:
+  name: Test
+mqtt:
+  host: 127.0.0.1
+sources:
+  - id: mopidy
+    uri: pipe:///tmp/mopidy.pcm
+"""
+
+
+def _load(tmp_path, extra: str):
+    path = tmp_path / "config.yaml"
+    path.write_text(_BASE + extra, encoding="utf-8")
+    return load_config(path)
+
+
+def test_legacy_active_source_is_ignored(tmp_path):
+    config = _load(tmp_path, "router:\n  active_source: mopidy\n")
+    assert not hasattr(config, "router")
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        ("groups:\n  - id: a\n    stream: nope\n", "unknown stream"),
+        ("groups:\n  - id: a\n  - id: a\n", "Duplicate group"),
+        ("groups:\n  - id: a\n    members: [x]\n  - id: b\n    members: [x]\n", "only belong"),
+        ("clients:\n  default_group: nope\n", "default_group"),
+        ("clients:\n  static:\n    - host: 1.2.3.4\n      group: nope\n", "unknown group"),
+    ],
+)
+def test_invalid_references_fail_fast(tmp_path, extra, message):
+    with pytest.raises(ValueError, match=message):
+        _load(tmp_path, extra)

@@ -3,53 +3,72 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
-from .config import AppConfig
-from .models import ClientInfo, GroupState
+from .config import AppConfig, StaticClientConfig
+from .models import ClientInfo, GroupState, SourceConfig
 
 _LOG = logging.getLogger(__name__)
 
+_UNSET = object()
 
-def _client_host(client: Any) -> str | None:
-    """Best-effort extraction of a connected client's remote host/IP.
 
-    aiosendspin does not (as far as I could verify) document a single
-    canonical attribute name for this, so we try a few plausible ones.
-    Used only to match a connected client back to a `clients.static` config
-    entry -- if none of these match on your installed version, static
-    clients still get created/connected, they just won't be auto-matched by
-    IP for group assignment (you can still assign them via MQTT set_members).
-    """
-    for attr in ("remote_address", "remote_ip", "address", "host", "ip"):
-        value = getattr(client, attr, None)
-        if not value:
-            continue
-        if isinstance(value, (tuple, list)) and value:
-            return str(value[0])
-        return str(value)
-    return None
+@dataclass
+class _GroupStream:
+    """The PushStream currently feeding one logical group."""
+
+    native_group: Any
+    stream: Any
+    source: SourceConfig
+    audio_format: Any
+    failed: bool = False
+
+
+def _player_roles(client: Any) -> list[Any]:
+    try:
+        return list(client.roles_by_family("player"))
+    except Exception:
+        return []
+
+
+def _static_url(cfg: StaticClientConfig) -> str:
+    return f"ws://{cfg.host}:{cfg.port}/sendspin"
 
 
 class SendspinBackend:
-    """Sendspin server integration isolated from the router/control layer."""
+    """aiosendspin integration: clients, native groups, volume and audio feeds.
+
+    The logical group membership (``GroupState.members``) is the single source
+    of truth. ``reconcile()`` idempotently makes aiosendspin's native groups and
+    PushStreams match it, so it is safe to call after every change and
+    periodically (clients connecting, reconnecting or being cleaned up).
+
+    Not thread-safe and not re-entrant: callers must serialize access (the
+    router app holds one lock around commands and refreshes).
+    """
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.server: Any | None = None
-        self.clients: dict[str, ClientInfo] = {}
         self.groups: dict[str, GroupState] = {g.group_id: g for g in config.groups}
-        self._started = False
-        self._unsubscribe_events = None
-        self._static_by_host = {c.host: c for c in config.clients.static}
-        self._default_group = config.clients.default_group
-        # group_id -> whatever aiosendspin object represents "this group's
-        # audio feed" (a PushStream, most likely). See attach_group_audio().
-        self._group_streams: dict[str, Any] = {}
-        # Logical router group id -> native aiosendspin SendspinGroup.
+        self.clients: dict[str, ClientInfo] = {}
+        self._sources: dict[str, SourceConfig] = {s.source_id: s for s in config.sources}
         self._native_groups: dict[str, Any] = {}
+        self._streams: dict[str, _GroupStream] = {}
+        self._seen_clients: set[str] = set()
+        self._last_live: dict[tuple[str, str, str], Any] = {}
+        self._unsubscribe_events: Callable[[], None] | None = None
+        # Called (synchronously, from the event loop) whenever aiosendspin
+        # reports a client/group change, so the app can refresh immediately.
+        self.on_change: Callable[[], None] | None = None
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     async def start(self) -> None:
         from aiosendspin.noise.keys import Identity
@@ -79,241 +98,213 @@ class SendspinBackend:
             allow_unencrypted=True,
             allow_noncompliant_clients=True,
         )
-        self._unsubscribe_events = self.server.add_event_listener(self._on_event)
+        self._unsubscribe_events = self.server.add_event_listener(self._on_server_event)
         await self.server.start_server(
             port=self.config.server.sendspin_port,
             discover_clients=True,
         )
-        self._started = True
         _LOG.info("Sendspin server started: %s (id=%s)", self.config.server.name, self.server.id)
-
-        await self.connect_static_clients()
+        self._connect_static_clients()
 
     async def stop(self) -> None:
         if self.server is None:
             return
-
         if self._unsubscribe_events:
             try:
                 self._unsubscribe_events()
             except Exception:
                 _LOG.exception("Failed to unsubscribe Sendspin event listener")
-            finally:
-                self._unsubscribe_events = None
+            self._unsubscribe_events = None
 
-        # Stop all group streams before closing the Sendspin server.
-        for group_id in list(self._group_streams):
-            await self.detach_group_audio(group_id)
-
+        for group_id in list(self._streams):
+            await self._stop_stream(group_id)
         try:
             await self.server.close()
         except Exception:
             _LOG.exception("Failed to close Sendspin server cleanly")
         finally:
             self.server = None
-            self._started = False
             self.clients.clear()
+            self._native_groups.clear()
 
+    def _connect_static_clients(self) -> None:
+        """Dial configured headless clients (ESP boards without mDNS/pairing UI).
 
-    # ------------------------------------------------------------------
-    # Static (headless) client connection
-    # ------------------------------------------------------------------
-
-    async def connect_static_clients(self) -> None:
-        """Connect configured headless clients by their fixed Sendspin URL.
-
-        aiosendspin 9.1.1 exposes ``connect_to_client(url)`` as a regular
-        method that starts the connection internally and returns ``None``.
-        It is therefore deliberately *not* awaited and must not be wrapped
-        in ``asyncio.create_task``.  The library owns the reconnect loop when
-        ``retry_indefinitely`` is enabled.
+        aiosendspin 9.1.1's ``connect_to_client(url)`` is a plain method that
+        starts the connection (and its retry loop) internally.
         """
-        if self.server is None:
-            return
-
-        for client_cfg in self._static_by_host.values():
-            url = f"ws://{client_cfg.host}:{client_cfg.port}/sendspin"
-            _LOG.info(
-                "Connecting static Sendspin client '%s' (group=%s)",
-                url,
-                client_cfg.group or "none",
-            )
+        assert self.server is not None
+        for cfg in self.config.clients.static:
+            url = _static_url(cfg)
+            _LOG.info("Connecting static Sendspin client %s (group=%s)", url, cfg.group or "-")
             try:
                 self.server.connect_to_client(
-                    url,
-                    retry_initial_connection=True,
-                    retry_indefinitely=True,
+                    url, retry_initial_connection=True, retry_indefinitely=True
                 )
             except Exception:
                 _LOG.exception("Failed to start connection for static client %s", url)
 
-
-    async def _auto_assign_group(self, client: Any, info: ClientInfo) -> None:
-        """Put a newly-seen client into its configured/default group."""
-        host = _client_host(client)
-        static_cfg = None
-        if self.server is not None:
-            url = self.server.get_client_url(info.client_id)
-            if url:
-                static_cfg = next(
-                    (cfg for cfg in self._static_by_host.values()
-                     if url == f"ws://{cfg.host}:{cfg.port}/sendspin"),
-                    None,
-                )
-        if static_cfg is None and host:
-            static_cfg = self._static_by_host.get(host)
-        group_id = static_cfg.group if static_cfg else self._default_group
-        if not group_id or group_id not in self.groups:
-            return
-        group = self.groups[group_id]
-        if info.client_id in group.members:
-            return
-        _LOG.info(
-            "Auto-assigning client '%s' (%s) to group '%s'",
-            info.client_id,
-            host or "unknown host",
-            group_id,
-        )
-        try:
-            await self.set_group_members(group_id, [*group.members, info.client_id])
-        except Exception:
-            _LOG.exception("Auto-assign of '%s' to group '%s' failed", info.client_id, group_id)
+    def _on_server_event(self, _server: Any, _event: Any) -> None:
+        if self.on_change is not None:
+            self.on_change()
 
     # ------------------------------------------------------------------
-    # Client/group bookkeeping
+    # State
     # ------------------------------------------------------------------
 
-    def _on_event(self, _server: Any, event: Any) -> None:
-        cid = getattr(event, "client_id", None)
-        if not cid or self.server is None:
-            return
-        event_name = event.__class__.__name__
-        if event_name == "ClientRemovedEvent":
-            self.clients.pop(cid, None)
-            return
-        client = self.server.get_client(cid)
-        if client is None:
-            return
-        previous = self.clients.get(cid)
-        self.clients[cid] = ClientInfo(
-            client_id=cid,
-            name=str(getattr(client, "name", None) or cid),
-            available=bool(getattr(client, "is_connected", False)),
-            roles=[str(getattr(r, "role_name", None) or r.__class__.__name__) for r in getattr(client, "active_roles", []) or []],
-            group_id=previous.group_id if previous else None,
-            volume=previous.volume if previous else None,
-            mute=previous.mute if previous else None,
-            offset_us=previous.offset_us if previous else 0,
-            capabilities={},
-        )
+    def list_clients(self) -> dict[str, dict[str, Any]]:
+        return {cid: info.to_dict() for cid, info in self.clients.items()}
 
-    async def refresh_clients(self) -> None:
+    def list_groups(self) -> dict[str, dict[str, Any]]:
+        return {
+            gid: {
+                "id": gid,
+                "name": g.name,
+                "members": list(g.members),
+                "volume": g.volume,
+                "mute": g.mute,
+                "stream": g.stream,
+                "playback_state": "playing" if self._stream_active(gid) else "stopped",
+            }
+            for gid, g in self.groups.items()
+        }
+
+    def group_of(self, client_id: str) -> str | None:
+        return next((gid for gid, g in self.groups.items() if client_id in g.members), None)
+
+    async def refresh(self) -> None:
+        """Sync client snapshots, auto-assign new clients, reconcile all groups."""
         if self.server is None:
             return
-        for client in self.server.clients:
-            cid = client.client_id
-            previous = self.clients.get(cid)
-            info = ClientInfo(
+        server_clients = {c.client_id: c for c in self.server.clients}
+
+        for cid in server_clients.keys() - self._seen_clients:
+            self._seen_clients.add(cid)
+            self._auto_assign(cid)
+
+        await self.reconcile()
+
+        previous = self.clients
+        self.clients = {}
+        for cid, client in server_clients.items():
+            old = previous.get(cid)
+            players = _player_roles(client)
+            live_volume = players[0].volume if players else None
+            live_mute = players[0].muted if players else None
+            self.clients[cid] = ClientInfo(
                 client_id=cid,
                 name=str(getattr(client, "name", None) or cid),
                 available=bool(getattr(client, "is_connected", False)),
-                roles=[str(getattr(r, "role_name", None) or r.__class__.__name__) for r in getattr(client, "active_roles", []) or []],
-                group_id=previous.group_id if previous else None,
-                volume=previous.volume if previous else None,
-                mute=previous.mute if previous else None,
-                offset_us=previous.offset_us if previous else 0,
-                capabilities={},
+                roles=[str(getattr(r, "role_id", None) or type(r).__name__)
+                       for r in getattr(client, "active_roles", ()) or ()],
+                group_id=self.group_of(cid),
+                volume=self._follow_live(("client", cid, "volume"), live_volume,
+                                         old.volume if old else None),
+                mute=self._follow_live(("client", cid, "mute"), live_mute,
+                                       old.mute if old else None),
             )
-            self.clients[cid] = info
-            if info.group_id is None:
-                await self._auto_assign_group(client, info)
 
-    def status(self) -> dict[str, Any]:
-        return {"started": self._started, "clients": len(self.clients), "groups": len(self.groups), "server_id": self.server.id if self.server else None}
+        for gid, group in self.groups.items():
+            role = self._player_group_role(gid)
+            if role is None or not role.get_player_clients():
+                continue
+            group.volume = self._follow_live(("group", gid, "volume"),
+                                             role.get_group_volume(), group.volume)
+            group.mute = self._follow_live(("group", gid, "mute"),
+                                           role.get_group_muted(), group.mute)
 
-    def list_clients(self) -> dict[str, dict[str, Any]]:
-        return {cid: vars(client).copy() for cid, client in self.clients.items()}
+    def _follow_live(self, key: tuple[str, str, str], live: Any, current: Any) -> Any:
+        """Report ``current`` unless the live device value changed since last seen.
 
-    def list_groups(self) -> dict[str, dict[str, Any]]:
-        return {gid: vars(group).copy() for gid, group in self.groups.items()}
+        A command updates ``current`` immediately while the device confirms
+        asynchronously; without this, the old live value would be published
+        in between and the UI control would jump back and forth.
+        """
+        if live is None or self._last_live.get(key, _UNSET) == live:
+            return current
+        self._last_live[key] = live
+        return live
+
+    def _auto_assign(self, client_id: str) -> None:
+        """Put a newly seen, unassigned client into its static/default group.
+
+        Runs once per client, so a client that was deliberately removed from
+        its group does not bounce back.
+        """
+        if self.group_of(client_id) is not None:
+            return
+        group_id = self._static_group_for(client_id) or self.config.clients.default_group
+        if not group_id or group_id not in self.groups:
+            return
+        _LOG.info("Auto-assigning client '%s' to group '%s'", client_id, group_id)
+        self.groups[group_id].members.append(client_id)
+
+    def _static_group_for(self, client_id: str) -> str | None:
+        assert self.server is not None
+        url = self.server.get_client_url(client_id)
+        if not url:
+            return None
+        host = urlparse(url).hostname
+        for cfg in self.config.clients.static:
+            if url == _static_url(cfg) or host == cfg.host:
+                return cfg.group
+        return None
+
+    # ------------------------------------------------------------------
+    # Commands
+    # ------------------------------------------------------------------
 
     async def set_group_members(self, group_id: str, members: list[str]) -> None:
-        """Update the logical group and mirror it to aiosendspin's native group."""
         group = self._group(group_id)
-        desired = list(dict.fromkeys(str(x) for x in members))
-        old = set(group.members)
-
-        if self.server is None:
-            group.members = desired
-            return
-
-        # Capture the old logical assignment before changing it. This matters when
-        # a client is moved from one logical group to another and the destination
-        # has not yet got a native Sendspin group.
-        previous_logical = {
-            cid: (self.clients[cid].group_id if cid in self.clients else None)
-            for cid in desired
-        }
-
-        desired_clients = [self.server.get_client(cid) for cid in desired]
-        desired_clients = [client for client in desired_clients if client is not None]
-
+        desired = list(dict.fromkeys(str(m) for m in members))
+        for other_id, other in self.groups.items():
+            if other_id != group_id and any(m in other.members for m in desired):
+                other.members = [m for m in other.members if m not in desired]
         group.members = desired
-        for cid in old | set(desired):
-            if cid in self.clients:
-                self.clients[cid].group_id = group_id if cid in desired else None
+        await self.reconcile(first=group_id)
 
-        if not desired_clients:
-            self._native_groups.pop(group_id, None)
-            if group_id in self._group_streams:
-                await self.detach_group_audio(group_id)
-            return
-
-        native_group = self._native_groups.get(group_id)
-        if native_group is None:
-            # Choose a client that was not already assigned to another logical
-            # group. If every desired client belongs elsewhere, explicitly move
-            # the first one to a fresh solo group and use that as our anchor.
-            anchor = next(
-                (c for c in desired_clients if previous_logical.get(c.client_id) in (None, group_id)),
-                desired_clients[0],
-            )
-            if previous_logical.get(anchor.client_id) not in (None, group_id):
-                await anchor.ungroup()
-            native_group = anchor.group
-            self._native_groups[group_id] = native_group
-
-        # Add desired members. aiosendspin removes each client from its old native
-        # group first and, if this group is already playing, joins its active stream.
-        for client in desired_clients:
-            if client not in native_group.clients:
-                await native_group.add_client(client)
-
-        # Members that left the logical group are placed into fresh Sendspin solo
-        # groups, matching aiosendspin's normal grouping semantics.
-        for cid in old - set(desired):
-            client = self.server.get_client(cid)
-            if client is not None and client in native_group.clients:
-                await client.ungroup()
-
-        if group.stream and group_id not in self._group_streams:
-            await self.attach_group_audio(group_id, group.stream)
+    async def set_client_group(self, client_id: str, group_id: str | None) -> None:
+        if group_id is not None:
+            self._group(group_id)
+        for group in self.groups.values():
+            if client_id in group.members:
+                group.members.remove(client_id)
+        if group_id is not None:
+            self.groups[group_id].members.append(client_id)
+        await self.reconcile(first=group_id)
 
     async def set_group_volume(self, group_id: str, volume: int) -> None:
-        self._group(group_id).volume = max(0, min(100, int(volume)))
+        group = self._group(group_id)
+        group.volume = volume
+        role = self._player_group_role(group_id)
+        if role is not None:
+            role.set_group_volume(volume)
 
     async def set_group_mute(self, group_id: str, mute: bool) -> None:
-        self._group(group_id).mute = bool(mute)
+        group = self._group(group_id)
+        group.mute = mute
+        role = self._player_group_role(group_id)
+        if role is not None:
+            role.set_group_muted(mute)
+
+    async def set_client_volume(self, client_id: str, volume: int) -> None:
+        for role in _player_roles(self._client(client_id)):
+            role.set_player_volume(volume)
+        if client_id in self.clients:
+            self.clients[client_id].volume = volume
+
+    async def set_client_mute(self, client_id: str, mute: bool) -> None:
+        for role in _player_roles(self._client(client_id)):
+            role.set_player_mute(mute)
+        if client_id in self.clients:
+            self.clients[client_id].mute = mute
 
     async def set_group_stream(self, group_id: str, source_id: str | None) -> None:
-        if source_id is not None and source_id not in {s.source_id for s in self.config.sources}:
+        group = self._group(group_id)
+        if source_id is not None and source_id not in self._sources:
             raise ValueError(f"Unknown source: {source_id}")
-        self._group(group_id).stream = source_id
-
-    async def set_active_source(self, source_id: str | None) -> None:
-        if source_id is not None and source_id not in {s.source_id for s in self.config.sources}:
-            raise ValueError(f"Unknown source: {source_id}")
-        self.config.router.active_source = source_id
+        group.stream = source_id
+        await self._sync_stream(group_id)
 
     def _group(self, group_id: str) -> GroupState:
         try:
@@ -321,72 +312,153 @@ class SendspinBackend:
         except KeyError as exc:
             raise ValueError(f"Unknown group: {group_id}") from exc
 
+    def _client(self, client_id: str) -> Any:
+        client = self.server.get_client(client_id) if self.server is not None else None
+        if client is None:
+            raise ValueError(f"Unknown client: {client_id}")
+        return client
+
+    def _player_group_role(self, group_id: str) -> Any | None:
+        native = self._native_groups.get(group_id)
+        return native.group_role("player") if native is not None else None
+
     # ------------------------------------------------------------------
-    # Audio: feeding PCM into aiosendspin's native SendspinGroup
+    # Native group reconciliation
     # ------------------------------------------------------------------
 
-    async def attach_group_audio(self, group_id: str, source_id: str) -> None:
+    async def reconcile(self, first: str | None = None) -> None:
+        """Make all native groups match the logical membership.
+
+        ``first`` is reconciled before the others: when clients move between
+        groups, the destination must pick them up before the source group
+        looks for a new anchor.
+        """
+        order = sorted(self.groups, key=lambda gid: gid != first)
+        for group_id in order:
+            try:
+                await self._reconcile_group(group_id)
+            except Exception:
+                _LOG.exception("Reconciling group '%s' failed", group_id)
+
+    async def _reconcile_group(self, group_id: str) -> None:
         if self.server is None:
             return
-        source = next((s for s in self.config.sources if s.source_id == source_id), None)
-        if source is None:
-            raise ValueError(f"Unknown source: {source_id}")
+        group = self.groups[group_id]
+        member_ids = set(group.members)
+        # Clients that switched to an external source are moved out of their
+        # group by aiosendspin itself; do not force them back in.
+        members = [
+            c for c in (self.server.get_client(cid) for cid in group.members)
+            if c is not None and getattr(c, "available", True)
+        ]
+        if not members:
+            if group_id in self._native_groups:
+                await self._stop_stream(group_id)
+                del self._native_groups[group_id]
+            return
 
-        await self.detach_group_audio(group_id)
-        native_group = self._native_groups.get(group_id)
-        if native_group is None or not native_group.clients:
-            _LOG.info(
-                "Group '%s' has no connected/registered Sendspin client yet; "
-                "PushStream will be created when the first client joins",
-                group_id,
+        native = self._native_groups.get(group_id)
+        if native is None or not any(c in native.clients for c in members):
+            anchor = members[0]
+            # A native group belongs to at most one logical group. If the
+            # anchor still shares its native group with foreign clients, or
+            # that group is registered for another logical group (and maybe
+            # streams its source), start from a fresh solo group instead.
+            owned_elsewhere = any(
+                n is anchor.group for gid, n in self._native_groups.items() if gid != group_id
             )
+            if owned_elsewhere or any(
+                c.client_id not in member_ids for c in anchor.group.clients
+            ):
+                await anchor.ungroup()
+            native = anchor.group
+            if group_id in self._native_groups:
+                _LOG.info("Group '%s' moved to native Sendspin group %s",
+                          group_id, native.group_id)
+            self._native_groups[group_id] = native
+
+        for client in members:
+            if client not in native.clients:
+                _LOG.info("Adding client '%s' to group '%s'", client.client_id, group_id)
+                await native.add_client(client)
+        for client in list(native.clients):
+            if client.client_id not in member_ids:
+                _LOG.info("Removing client '%s' from group '%s'", client.client_id, group_id)
+                await client.ungroup()
+
+        await self._sync_stream(group_id)
+
+    # ------------------------------------------------------------------
+    # Audio
+    # ------------------------------------------------------------------
+
+    def _stream_active(self, group_id: str) -> bool:
+        current = self._streams.get(group_id)
+        return current is not None and not current.stream.is_stopped
+
+    async def _sync_stream(self, group_id: str) -> None:
+        """Start, restart or stop the group's PushStream to match its state."""
+        group = self.groups[group_id]
+        native = self._native_groups.get(group_id)
+        source = self._sources.get(group.stream) if group.stream else None
+        if source is None or native is None:
+            await self._stop_stream(group_id)
             return
 
-        stream = native_group.start_stream()
-        # FIFO-backed sources are realtime. This keeps the Sendspin startup lead
-        # at the client's minimum buffer instead of accumulating unnecessary latency.
+        current = self._streams.get(group_id)
+        if (
+            current is not None
+            and current.native_group is native
+            and current.source is source
+            and not current.stream.is_stopped
+        ):
+            return
+
+        from aiosendspin.audio.format import AudioFormat
+
+        # start_stream() replaces any previous stream of this native group.
+        stream = native.start_stream()
+        # FIFO-backed sources are realtime: keep the startup lead at the
+        # client's minimum buffer instead of accumulating latency.
         stream.set_live_source(True)
-        self._group_streams[group_id] = stream
-        _LOG.info(
-            "Group '%s' now streaming source '%s' via native Sendspin group %s",
-            group_id,
-            source_id,
-            native_group.group_id,
-        )
-
-    async def detach_group_audio(self, group_id: str) -> None:
-        stream = self._group_streams.pop(group_id, None)
-        if stream is None:
-            return
-        try:
-            stream.stop()
-        except Exception:
-            _LOG.exception("Failed to stop push stream for group '%s'", group_id)
-
-    async def feed_group(self, group_id: str, pcm_chunk: bytes) -> None:
-        """Prepare one raw PCM chunk and commit it to the group's PushStream."""
-        stream = self._group_streams.get(group_id)
-        if stream is None or not pcm_chunk:
-            return
-        group_cfg = self._group(group_id)
-        source_id = group_cfg.stream
-        if source_id is None:
-            return
-        source = next((s for s in self.config.sources if s.source_id == source_id), None)
-        if source is None:
-            return
-
-        try:
-            from aiosendspin.audio.format import AudioFormat
-
-            audio_format = AudioFormat(
+        if current is not None and current.native_group is not native:
+            current.stream.stop()
+        self._streams[group_id] = _GroupStream(
+            native_group=native,
+            stream=stream,
+            source=source,
+            audio_format=AudioFormat(
                 sample_rate=source.sample_rate,
                 bit_depth=source.bit_depth,
                 channels=source.channels,
-            )
-            stream.prepare_audio(pcm_chunk, audio_format)
-            await stream.commit_audio()
+            ),
+        )
+        _LOG.info("Group '%s' streaming source '%s' (native group %s)",
+                  group_id, source.source_id, native.group_id)
+
+    async def _stop_stream(self, group_id: str) -> None:
+        current = self._streams.pop(group_id, None)
+        if current is None:
+            return
+        try:
+            if current.native_group is self._native_groups.get(group_id):
+                await current.native_group.stop()  # also tells clients "stopped"
+            else:
+                current.stream.stop()
         except Exception:
-            _LOG.exception("PushStream audio commit failed for group '%s'", group_id)
+            _LOG.exception("Failed to stop stream for group '%s'", group_id)
+        _LOG.info("Group '%s' stopped streaming", group_id)
 
-
+    async def feed_group(self, group_id: str, pcm_chunk: bytes) -> None:
+        """Commit one PCM chunk (whole frames) to the group's PushStream."""
+        current = self._streams.get(group_id)
+        if current is None or current.stream.is_stopped or not pcm_chunk:
+            return
+        try:
+            current.stream.prepare_audio(pcm_chunk, current.audio_format)
+            await current.stream.commit_audio()
+        except Exception:
+            # Log once per stream; this runs ~50 times per second.
+            if not current.failed:
+                current.failed = True
+                _LOG.exception("PushStream audio commit failed for group '%s'", group_id)
