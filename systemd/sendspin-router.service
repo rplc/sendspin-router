@@ -2,7 +2,7 @@
 Description=Sendspin Router
 # The MQTT broker (ioBroker) runs on another host. The router reconnects to
 # it on its own, so only the network is required, not a local broker.
-After=network-online.target
+After=network-online.target systemd-tmpfiles-setup.service
 Wants=network-online.target
 RequiresMountsFor=/home/pi/sendspin-router
 
