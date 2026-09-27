@@ -75,19 +75,24 @@ const GROUP_RULES = [
 // actual client ID/MAC if necessary.
 const VOLUME_PROFILES = {
     wohnzimmer: {
-        Balanced: { mode: 'group' },
-        Kochen: {
+        balanced: { 
+            title: 'Balanced',
+            mode: 'group'
+        },
+        cooking: {
+            title: 'Cooking',
             mode: 'clients',
-            default: 45,
+            default: 35,
             clients: {
-                'wohnzimmer-1-sendspin': 75,
-            },
+                '68:EE:8F:53:51:24': 65 // WZ 3 = Küche
+            }
         },
-        Hintergrundbeschallung: {
+        background: {
+            title: 'Background Noise',
             mode: 'clients',
-            default: 30,
-        },
-    },
+            default: 35
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -150,11 +155,6 @@ function setObjectP(id, obj) {
 
 function deleteObjectP(id, recursive = false) {
     return new Promise((resolve, reject) => deleteObject(id, recursive, err => (err ? reject(err) : resolve())));
-}
-
-function getObjectViewP(design, search, params) {
-    return new Promise((resolve, reject) =>
-        getObjectView(design, search, params, (err, res) => (err ? reject(err) : resolve(res))));
 }
 
 // All work runs strictly one task after another, so overlapping MQTT updates
@@ -318,7 +318,7 @@ async function mirrorSources() {
 
 function volumeProfileChoices(groupId) {
     const profiles = VOLUME_PROFILES[groupId] || {};
-    return Object.fromEntries(Object.keys(profiles).map(name => [name, name]));
+    return Object.fromEntries(Object.keys(profiles).map(name => [name, profiles[name].title || name]));
 }
 
 function getVolumeProfile(groupId, profileName) {
@@ -327,7 +327,11 @@ function getVolumeProfile(groupId, profileName) {
 
 function profileVolume(groupId, profileName, clientId) {
     const profile = getVolumeProfile(groupId, profileName);
-    if (!profile || profile.mode === 'group') return null;
+
+    if (!profile || profile.mode === 'group') {
+        return clampVolume(profile.default || getState(`0_userdata.0.SendspinRouter.Groups.${groupId}.Volume`).val);
+    };
+
     const configured = profile.clients || {};
     if (Object.prototype.hasOwnProperty.call(configured, clientId)) {
         return clampVolume(configured[clientId]);
@@ -339,15 +343,6 @@ function applyVolumeProfile(groupId, profileName) {
     const profile = getVolumeProfile(groupId, profileName);
     const group = data.groups[groupId];
     if (!profile || !group) throw new Error(`unknown volume profile '${profileName}' for '${groupId}'`);
-
-    if (profile.mode === 'group') {
-        // Restore the normal balanced behaviour: all members receive the
-        // current group volume once, after which future group-volume changes
-        // are handled natively by Sendspin.
-        const volume = clampVolume(group.volume ?? 0);
-        publish(`group/${groupId}/set_volume`, { volume });
-        return;
-    }
 
     for (const clientId of group.members || []) {
         publish(`client/${clientId}/set_volume`, {
@@ -411,17 +406,7 @@ async function mirrorGroups() {
 
         onCommand(`${base}.Volume`, v => {
             const volume = clampVolume(v);
-            const currentProfileState = getState(`${base}.VolumeProfile`);
-            const currentProfile = currentProfileState && getVolumeProfile(id, currentProfileState.val);
-            if (currentProfile && currentProfile.mode !== 'group') {
-                // In a non-balanced profile the group slider is intentionally
-                // not the master. Reapply the selected profile after a manual
-                // group-volume write so its speaker balance cannot be lost.
-                publish(`group/${id}/set_volume`, { volume });
-                setTimeout(() => enqueue(() => applyVolumeProfile(id, String(currentProfileState.val))), 250);
-            } else {
-                publish(`group/${id}/set_volume`, { volume });
-            }
+            publish(`group/${id}/set_volume`, { volume });
         });
         onCommand(`${base}.Mute`, v => publish(`group/${id}/set_mute`, { mute: toBool(v) }));
         onCommand(`${base}.Stream`, v => {
@@ -618,29 +603,37 @@ async function cleanupVanishedClients() {
     // While the router is offline its client list is stale; never delete then.
     if (data.availability !== 'online') return;
 
-    const prefix = `${ROOT}.Clients.`;
-    const view = await getObjectViewP('system', 'channel', { startkey: prefix, endkey: `${prefix}\u9999` });
-    const present = new Set(Object.keys(data.clients).map(safe));
+    // Do not use getObjectView()/getObjectList* here. Those APIs are not
+    // guaranteed to be exposed by the ioBroker JavaScript adapter.
+    // knownClients contains every client this script has seen during the
+    // current run, which is sufficient to detect clients that subsequently
+    // disappear from the router state.
+    const present = new Set(Object.keys(data.clients));
     const now = Date.now();
 
-    for (const row of (view && view.rows) || []) {
-        const key = row.id.slice(prefix.length);
-        if (!key || key.includes('.')) continue; // only Clients.<client> channels
-        if (present.has(key)) {
-            missingSince.delete(key);
+    for (const clientId of [...knownClients]) {
+        if (present.has(clientId)) {
+            missingSince.delete(safe(clientId));
             continue;
         }
+
+        const key = safe(clientId);
         if (!missingSince.has(key)) {
             missingSince.set(key, now); // the grace period starts now
             continue;
         }
+
         if (now - missingSince.get(key) < CLIENT_CLEANUP_AFTER_HOURS * 3600 * 1000) continue;
 
-        await deleteObjectP(row.id, true);
-        forgetObjects(row.id);
+        const objectId = `${ROOT}.Clients.${key}`;
+        if (existsObject(objectId)) {
+            await deleteObjectP(objectId, true);
+            forgetObjects(objectId);
+        }
+
         missingSince.delete(key);
-        for (const id of [...knownClients]) if (safe(id) === key) knownClients.delete(id);
-        log(`Sendspin: removed client ${row.id}, not reported by the router for ` +
+        knownClients.delete(clientId);
+        log(`Sendspin: removed client ${objectId}, not reported by the router for ` +
             `${CLIENT_CLEANUP_AFTER_HOURS} h`);
     }
 }
