@@ -1,3 +1,8 @@
+## 0.5.1
+
+- Group MQTT `playback_state` now follows the selected source's real `playing` state from the PCM activity detector. A configured but silent source reports `stopped`.
+- Audio routing itself is unchanged.
+
 ## 0.5.0
 
 - New: PCM source state now distinguishes `available` (PCM is flowing) from

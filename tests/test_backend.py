@@ -191,3 +191,11 @@ async def test_moving_a_whole_group_keeps_the_destination_stream_running():
     assert a.group.stream is stream
     assert "bad" not in backend._native_groups
     assert backend.list_groups()["wohnzimmer"]["playback_state"] == "playing"
+
+
+def test_group_playback_state_follows_source_activity():
+    backend, _server = _backend(
+        groups=[GroupState(group_id="wohnzimmer", name="W", members=["a"], stream="spotify")]
+    )
+    assert backend.list_groups({"spotify": False})["wohnzimmer"]["playback_state"] == "stopped"
+    assert backend.list_groups({"spotify": True})["wohnzimmer"]["playback_state"] == "playing"

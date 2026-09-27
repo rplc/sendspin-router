@@ -160,6 +160,10 @@ class RouterApp:
 
     async def publish_state(self) -> None:
         await self.mqtt.publish_json("state/clients", self.backend.list_clients(), retain=True)
-        await self.mqtt.publish_json("state/groups", self.backend.list_groups(), retain=True)
+        await self.mqtt.publish_json(
+            "state/groups",
+            self.backend.list_groups(self.audio.playing_state()),
+            retain=True,
+        )
         await self.mqtt.publish_json("state/sources", self.audio.state(), retain=True)
         await self.mqtt.publish_json("state/router", {"version": __version__}, retain=True)

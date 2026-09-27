@@ -125,6 +125,10 @@ class AudioRouter:
         self._group_source: dict[str, str] = {}
         self._executor: ThreadPoolExecutor | None = None
 
+    def playing_state(self) -> dict[str, bool]:
+        """Return current signal activity for each configured PCM source."""
+        return {source_id: state.playing for source_id, state in self._sources.items()}
+
     def state(self) -> dict[str, dict]:
         return {
             source_id: {

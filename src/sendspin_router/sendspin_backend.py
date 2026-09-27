@@ -155,7 +155,17 @@ class SendspinBackend:
     def list_clients(self) -> dict[str, dict[str, Any]]:
         return {cid: info.to_dict() for cid, info in self.clients.items()}
 
-    def list_groups(self) -> dict[str, dict[str, Any]]:
+    def list_groups(self, source_playing: dict[str, bool] | None = None) -> dict[str, dict[str, Any]]:
+        """Return logical group state. Playback follows the selected source activity."""
+        if source_playing is None:
+            # Backward-compatible fallback for callers that do not have the
+            # AudioRouter activity map (tests/tools). The application passes
+            # the live source activity explicitly.
+            source_playing = {
+                g.stream: self._stream_active(gid)
+                for gid, g in self.groups.items()
+                if g.stream is not None
+            }
         return {
             gid: {
                 "id": gid,
@@ -164,7 +174,11 @@ class SendspinBackend:
                 "volume": g.volume,
                 "mute": g.mute,
                 "stream": g.stream,
-                "playback_state": "playing" if self._stream_active(gid) else "stopped",
+                "playback_state": (
+                    "playing"
+                    if (g.stream is not None and source_playing.get(g.stream, False))
+                    else "stopped"
+                ),
             }
             for gid, g in self.groups.items()
         }
