@@ -15,6 +15,7 @@
  *   Groups.<group>.Stream    (input_select in Lovelace)  -> set_stream
  *   Groups.<group>.Volume    (input_number in Lovelace)  -> set_volume
  *   Groups.<group>.Mute      (input_boolean in Lovelace) -> set_mute
+ *   Groups.<group>.VolumeProfile (input_select) -> individual volume profile
  *   Groups.<group>.Members   (JSON array of client ids)  -> set_members
  *   Clients.<client>.Group   (group id, '' = none)       -> set_group
  *   Clients.<client>.Volume / .Mute                      -> set_volume / set_mute
@@ -62,6 +63,32 @@ const GROUP_RULES = [
     { group: 'bad', regex: [/^bad/i, /badezimmer/i, /bath/i] },
     { group: 'schlafzimmer', regex: [/^schlafzimmer/i, /bedroom/i] },
 ];
+
+// Optional per-group volume profiles. These are deliberately kept in the
+// ioBroker script: they are room/UI policy, not Sendspin/router state.
+//
+// 'Balanced' means normal group volume: one group-volume command controls all
+// clients equally. Other profiles set individual player volumes.
+//
+// Client keys are Sendspin client IDs (on the ESP boards this may be the MAC).
+// Unknown clients use 'default'. Replace the example target ID below with the
+// actual client ID/MAC if necessary.
+const VOLUME_PROFILES = {
+    wohnzimmer: {
+        Balanced: { mode: 'group' },
+        Kochen: {
+            mode: 'clients',
+            default: 45,
+            clients: {
+                'wohnzimmer-1-sendspin': 75,
+            },
+        },
+        Hintergrundbeschallung: {
+            mode: 'clients',
+            default: 30,
+        },
+    },
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -272,6 +299,7 @@ async function mirrorSources() {
         await ensureState(`${base}.Id`, { name: 'Source ID', type: 'string', role: 'text' });
         await ensureState(`${base}.Name`, { name: 'Name', type: 'string', role: 'text' });
         await ensureState(`${base}.Available`, { name: 'Audio flowing', type: 'boolean', role: 'indicator' });
+        await ensureState(`${base}.Playing`, { name: 'Audio activity', type: 'boolean', role: 'indicator' });
         await ensureState(`${base}.Uri`, { name: 'URI', type: 'string', role: 'text' });
         await ensureState(`${base}.SampleRate`, { name: 'Sample rate', type: 'number', role: 'value', unit: 'Hz' });
         await ensureState(`${base}.Channels`, { name: 'Channels', type: 'number', role: 'value' });
@@ -280,10 +308,51 @@ async function mirrorSources() {
         await put(`${base}.Id`, String(s.id || id));
         await put(`${base}.Name`, String(s.name || id));
         await put(`${base}.Available`, !!s.available);
+        await put(`${base}.Playing`, !!s.playing);
         await put(`${base}.Uri`, String(s.uri || ''));
         await put(`${base}.SampleRate`, Number(s.sample_rate || 0));
         await put(`${base}.Channels`, Number(s.channels || 0));
         await put(`${base}.BitDepth`, Number(s.bit_depth || 0));
+    }
+}
+
+function volumeProfileChoices(groupId) {
+    const profiles = VOLUME_PROFILES[groupId] || {};
+    return Object.fromEntries(Object.keys(profiles).map(name => [name, name]));
+}
+
+function getVolumeProfile(groupId, profileName) {
+    return (VOLUME_PROFILES[groupId] || {})[profileName] || null;
+}
+
+function profileVolume(groupId, profileName, clientId) {
+    const profile = getVolumeProfile(groupId, profileName);
+    if (!profile || profile.mode === 'group') return null;
+    const configured = profile.clients || {};
+    if (Object.prototype.hasOwnProperty.call(configured, clientId)) {
+        return clampVolume(configured[clientId]);
+    }
+    return clampVolume(profile.default ?? 0);
+}
+
+function applyVolumeProfile(groupId, profileName) {
+    const profile = getVolumeProfile(groupId, profileName);
+    const group = data.groups[groupId];
+    if (!profile || !group) throw new Error(`unknown volume profile '${profileName}' for '${groupId}'`);
+
+    if (profile.mode === 'group') {
+        // Restore the normal balanced behaviour: all members receive the
+        // current group volume once, after which future group-volume changes
+        // are handled natively by Sendspin.
+        const volume = clampVolume(group.volume ?? 0);
+        publish(`group/${groupId}/set_volume`, { volume });
+        return;
+    }
+
+    for (const clientId of group.members || []) {
+        publish(`client/${clientId}/set_volume`, {
+            volume: profileVolume(groupId, profileName, clientId),
+        });
     }
 }
 
@@ -315,6 +384,15 @@ async function mirrorGroups() {
             custom: lovelace('input_select', `sendspin_${name}_Stream`),
         });
 
+        const profileChoices = volumeProfileChoices(id);
+        if (Object.keys(profileChoices).length) {
+            await ensureState(`${base}.VolumeProfile`, {
+                name: 'Volume profile', type: 'string', role: 'level', write: true,
+                states: profileChoices,
+                custom: lovelace('input_select', `sendspin_${name}_VolumeProfile`),
+            });
+        }
+
         await put(`${base}.Id`, String(g.id || id));
         await put(`${base}.Name`, String(name));
         await put(`${base}.PlaybackState`, String(g.playback_state || 'stopped'));
@@ -322,14 +400,44 @@ async function mirrorGroups() {
         await put(`${base}.Volume`, Number(g.volume ?? 0));
         await put(`${base}.Mute`, !!g.mute);
         await put(`${base}.Stream`, g.stream || STREAM_OFF);
+        if (Object.keys(profileChoices).length) {
+            const profileStateId = `${base}.VolumeProfile`;
+            const current = await getStateAsync(profileStateId);
+            const profile = current && getVolumeProfile(id, current.val)
+                ? String(current.val)
+                : Object.keys(profileChoices)[0];
+            await put(profileStateId, profile);
+        }
 
-        onCommand(`${base}.Volume`, v => publish(`group/${id}/set_volume`, { volume: clampVolume(v) }));
+        onCommand(`${base}.Volume`, v => {
+            const volume = clampVolume(v);
+            const currentProfileState = getState(`${base}.VolumeProfile`);
+            const currentProfile = currentProfileState && getVolumeProfile(id, currentProfileState.val);
+            if (currentProfile && currentProfile.mode !== 'group') {
+                // In a non-balanced profile the group slider is intentionally
+                // not the master. Reapply the selected profile after a manual
+                // group-volume write so its speaker balance cannot be lost.
+                publish(`group/${id}/set_volume`, { volume });
+                setTimeout(() => enqueue(() => applyVolumeProfile(id, String(currentProfileState.val))), 250);
+            } else {
+                publish(`group/${id}/set_volume`, { volume });
+            }
+        });
         onCommand(`${base}.Mute`, v => publish(`group/${id}/set_mute`, { mute: toBool(v) }));
         onCommand(`${base}.Stream`, v => {
             const source = !v || v === STREAM_OFF ? null : String(v);
             if (source !== null && !data.sources[source]) throw new Error(`unknown source '${source}'`);
             publish(`group/${id}/set_stream`, { source });
         });
+        if (Object.keys(profileChoices).length) {
+            onCommand(`${base}.VolumeProfile`, v => {
+                const profileName = String(v);
+                if (!getVolumeProfile(id, profileName)) {
+                    throw new Error(`unknown volume profile '${profileName}' for '${id}'`);
+                }
+                applyVolumeProfile(id, profileName);
+            });
+        }
         onCommand(`${base}.Members`, v => {
             const members = parse(v, []);
             if (!Array.isArray(members)) throw new Error('Members must be a JSON array');

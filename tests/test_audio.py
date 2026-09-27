@@ -4,7 +4,10 @@ import time
 
 import pytest
 
-from sendspin_router.audio import _MAX_LAG_S, _MAX_LEAD_S, AudioRouter, _Pacer
+from sendspin_router.audio import (
+    _ACTIVITY_START_PEAK, _ACTIVITY_START_S, _ACTIVITY_STOP_PEAK, _ACTIVITY_STOP_S,
+    _MAX_LAG_S, _MAX_LEAD_S, AudioRouter, _Pacer, _SourceState,
+)
 from sendspin_router.models import SourceConfig
 
 
@@ -21,6 +24,34 @@ async def _wait_for(predicate, timeout=2.0):
         await asyncio.sleep(0.02)
     return False
 
+
+
+
+def _pcm_stereo_16(value: int, frames: int = 960) -> bytes:
+    sample = int(value).to_bytes(2, "little", signed=True)
+    return sample + sample * 0 + (sample + sample) * frames
+
+
+def test_activity_detector_has_hysteresis():
+    source = SourceConfig(source_id="s", name="S", uri="pipe:///tmp/s.pcm")
+    state = _SourceState(source)
+
+    now = 0.0
+    AudioRouter._update_activity(state, _ACTIVITY_START_PEAK + 10, now)
+    assert state.playing is False
+    AudioRouter._update_activity(state, _ACTIVITY_START_PEAK + 10, now + _ACTIVITY_START_S + 0.01)
+    assert state.playing is True
+
+    AudioRouter._update_activity(state, _ACTIVITY_STOP_PEAK - 10, now + _ACTIVITY_START_S + 0.02)
+    assert state.playing is True
+    AudioRouter._update_activity(state, _ACTIVITY_STOP_PEAK - 10, now + _ACTIVITY_START_S + _ACTIVITY_STOP_S + 0.03)
+    assert state.playing is False
+
+
+def test_activity_peak_sampling_detects_16bit_audio():
+    source = SourceConfig(source_id="s", name="S", uri="pipe:///tmp/s.pcm")
+    chunk = (int(_ACTIVITY_START_PEAK + 20).to_bytes(2, "little", signed=True) * 2) * 20
+    assert AudioRouter._peak_16bit(source, chunk) >= _ACTIVITY_START_PEAK
 
 async def test_subscribe_reads_whole_frames_from_fifo(tmp_path):
     fifo_path = tmp_path / "test.pcm"

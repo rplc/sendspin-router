@@ -53,6 +53,28 @@ source .venv/bin/activate
 sendspin-router --help
 ```
 
+
+### Source activity detection
+
+`state/sources` now distinguishes two concepts:
+
+- `available`: PCM bytes are currently flowing from the upstream writer.
+- `playing`: a lightweight sampled peak detector sees actual audio activity.
+
+This matters for continuously running sources such as Spotify or Chromecast,
+which can keep writing silence into their FIFOs while paused. The detector
+checks only one frame out of every 20 and uses start/stop hysteresis, so it is
+designed to be negligible on a Raspberry Pi 3B+.
+
+### ioBroker volume profiles
+
+The ioBroker script contains optional per-group `VOLUME_PROFILES`. For example,
+`Balanced` uses normal Sendspin group volume, while `Kochen` and
+`Hintergrundbeschallung` can set individual client volumes. Client keys are
+Sendspin client IDs; on ESP clients these may be MAC addresses. Edit the
+`VOLUME_PROFILES` object at the top of `iobroker/sendspin-router.js` to match
+the actual clients and desired levels.
+
 ## MQTT
 
 The router uses MQTT as its only control/state API. Base topic is

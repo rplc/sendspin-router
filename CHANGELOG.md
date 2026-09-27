@@ -1,3 +1,13 @@
+## 0.5.0
+
+- New: PCM source state now distinguishes `available` (PCM is flowing) from
+  `playing` (audio activity detected). Activity detection samples only a small
+  fraction of 16-bit PCM frames, with hysteresis, to keep Raspberry Pi 3B+ CPU
+  usage negligible.
+- New: ioBroker mirrors source `Playing` and adds configurable per-group
+  `VolumeProfile` selects. `Balanced` uses normal Sendspin group volume; other
+  profiles can set individual client volumes.
+
 # Changelog
 
 ## 0.4.0

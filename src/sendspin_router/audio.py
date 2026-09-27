@@ -28,6 +28,16 @@ _MAX_LEAD_S = 0.2
 # pacing clock restarts instead of letting the backlog burst through.
 _MAX_LAG_S = 0.5
 
+# Audio activity detection. This intentionally uses a very cheap sampled peak
+# detector rather than FFT/RMS over every sample. At 48 kHz stereo we inspect
+# one frame out of every 20, so even three sources require only ~29k sample
+# conversions per second.
+_ACTIVITY_SAMPLE_EVERY_FRAMES = 20
+_ACTIVITY_START_PEAK = 180   # ~-45 dBFS for signed 16-bit PCM
+_ACTIVITY_STOP_PEAK = 58     # ~-55 dBFS
+_ACTIVITY_START_S = 0.10
+_ACTIVITY_STOP_S = 1.00
+
 
 def _fifo_path(uri: str) -> str:
     """Extract the filesystem path from a ``pipe://`` URI.
@@ -85,6 +95,9 @@ class _SourceState:
     task: asyncio.Task[None] | None = None
     sinks: dict[str, FrameSink] = field(default_factory=dict)  # group_id -> sink
     available: bool = False
+    playing: bool = False
+    active_since: float | None = None
+    silent_since: float | None = None
 
 
 class AudioRouter:
@@ -122,6 +135,7 @@ class AudioRouter:
                 "channels": s.config.channels,
                 "bit_depth": s.config.bit_depth,
                 "available": s.available,
+                "playing": s.playing,
             }
             for source_id, s in self._sources.items()
         }
@@ -144,6 +158,9 @@ class AudioRouter:
         for state in self._sources.values():
             state.task = None
             state.available = False
+            state.playing = False
+            state.active_since = None
+            state.silent_since = None
         self._group_source.clear()
         if self._executor is not None:
             # Reader threads return within _IDLE_TIMEOUT_S; don't wait for them.
@@ -230,8 +247,9 @@ class AudioRouter:
                             self._thread_pool(), _read_with_timeout, fd, chunk_size,
                             _IDLE_TIMEOUT_S,
                         )
-                        if chunk is None:  # writer attached but silent (paused)
+                        if chunk is None:  # no PCM arrived during the timeout
                             state.available = False
+                            self._update_activity(state, 0, loop.time())
                             pacer.reset()
                             continue
                         if not chunk:  # no writer (anymore)
@@ -242,6 +260,7 @@ class AudioRouter:
                             _LOG.info("PCM source '%s' receiving audio", cfg.source_id)
                             received_any = True
                         state.available = True
+                        self._update_activity(state, self._peak_16bit(cfg, chunk), loop.time())
 
                         # Only hand whole frames downstream; a partial frame
                         # would shift every following sample.
@@ -262,9 +281,62 @@ class AudioRouter:
                 finally:
                     os.close(fd)
                     state.available = False
+                    state.playing = False
+                    state.active_since = None
+                    state.silent_since = None
                 await asyncio.sleep(_REOPEN_DELAY_S)
         finally:
             state.available = False
+            state.playing = False
+            state.active_since = None
+            state.silent_since = None
+
+    @staticmethod
+    def _peak_16bit(cfg: SourceConfig, chunk: bytes) -> int:
+        """Return a cheap sampled peak for signed little-endian 16-bit PCM.
+
+        All current sources are 48 kHz / 16-bit / stereo. For other formats
+        we conservatively report silence here; the FIFO still works normally.
+        """
+        if cfg.bit_depth != 16:
+            return 0
+        frame_size = cfg.frame_size
+        if frame_size < 2:
+            return 0
+        step = frame_size * _ACTIVITY_SAMPLE_EVERY_FRAMES
+        peak = 0
+        for offset in range(0, len(chunk) - 1, step):
+            for channel_offset in range(0, frame_size - 1, 2):
+                value = int.from_bytes(chunk[offset + channel_offset:offset + channel_offset + 2],
+                                       byteorder="little", signed=True)
+                if abs(value) > peak:
+                    peak = abs(value)
+        return peak
+
+    @staticmethod
+    def _update_activity(state: _SourceState, peak: int, now: float) -> None:
+        """Update playing state with hysteresis so silence/noise is stable."""
+        if peak >= _ACTIVITY_START_PEAK:
+            state.silent_since = None
+            if not state.playing:
+                if state.active_since is None:
+                    state.active_since = now
+                elif now - state.active_since >= _ACTIVITY_START_S:
+                    state.playing = True
+        elif peak <= _ACTIVITY_STOP_PEAK:
+            state.active_since = None
+            if state.playing:
+                if state.silent_since is None:
+                    state.silent_since = now
+                elif now - state.silent_since >= _ACTIVITY_STOP_S:
+                    state.playing = False
+            else:
+                state.silent_since = None
+        else:
+            # Between thresholds: retain the current state, but do not allow
+            # a partial burst/noise sample to accumulate toward a transition.
+            state.active_since = None
+            state.silent_since = None
 
     async def _deliver(self, state: _SourceState, chunk: bytes) -> None:
         for group_id, sink in list(state.sinks.items()):

@@ -101,20 +101,25 @@ JSON object keyed by source ID. Sources come from the YAML config.
     "sample_rate": 48000,
     "channels": 2,
     "bit_depth": 16,
-    "available": true
+    "available": true,
+    "playing": false
   }
 }
 ```
 
-`available` is `true` while PCM data is actually flowing, i.e. the upstream
-player is playing. All configured FIFOs are read continuously, also those no
-group is using (the audio is then discarded), so this works for every source
-and upstream players never block on a full pipe.
+- `available` is `true` while PCM data is flowing from the upstream writer.
+- `playing` is a cheap PCM activity estimate with hysteresis. It is `false`
+  for a continuously running but silent capture/decoder (e.g. Chromecast or
+  Spotify's FIFO when paused).
+
+All configured FIFOs are read continuously, also those no group is using (the
+audio is then discarded), so this works for every source and upstream players
+never block on a full pipe.
 
 ## `state/router`
 
 ```json
-{"version": "0.4.0"}
+{"version": "0.5.0"}
 ```
 
 ## Events
