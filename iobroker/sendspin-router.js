@@ -702,3 +702,39 @@ enqueue(async () => {
 });
 
 schedule(CLIENT_CLEANUP_CRON, () => enqueue(cleanupVanishedClients));
+
+const GROUP_DEFAULTS = {
+        wohnzimmer: {
+            Stream: 'spotify',
+            Volume: 60,
+            Mute: false
+        },
+        bad: {
+            Stream: 'spotify',
+            Volume: 60,
+            Mute: true
+        },
+        schlafzimmer: {
+            Stream: 'spotify',
+            Volume: 60,
+            Mute: true
+        }
+    },
+    playbackStateRegExp = new RegExp(`^(${ROOT}\\.Groups\\.(.+))\\.PlaybackState$`);
+
+on(playbackStateRegExp, (payload) => {
+    if (payload.state.val === 'stopped') {
+        // Stream stoppen playing -> reset group to default
+        const match = payload.id.match(playbackStateRegExp),
+            path = match && match[1],
+            group = match && match[2],
+            groupDefaults = group && GROUP_DEFAULTS[group];
+
+        if (path && groupDefaults) {
+            log(`Playing stopped, resetting to defaults for ${path}`);
+            Object.keys(groupDefaults).forEach((key) => {
+                setState(`${path}.${key}`, groupDefaults[key]);
+            });
+        }
+    }
+});
