@@ -154,7 +154,12 @@ class RouterApp:
 
     async def _route_group_stream(self, group_id: str, source_id: str | None) -> None:
         """Point a group at a source: PCM fan-out (audio) plus PushStream (backend)."""
-        await self.backend.set_group_stream(group_id, source_id)
+        source_playing = (
+            self.audio.playing_state().get(source_id, False)
+            if source_id is not None
+            else False
+        )
+        await self.backend.set_group_stream(group_id, source_id, source_playing)
         if source_id is None:
             await self.audio.unsubscribe(group_id)
         else:

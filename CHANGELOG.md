@@ -21,6 +21,16 @@
 
 # Changelog
 
+## 0.5.3
+
+- Tie native Sendspin playback transport to detected source activity.
+- Stop a group's Sendspin stream when the selected PCM source becomes silent,
+  so ESPHome reaches IDLE and the Louder TAS58xx DAC can disable.
+- Keep AudioRouter FIFO readers/subscriptions alive while the Sendspin transport
+  is stopped, so Mopidy/Spotify/Chromecast writers are still continuously drained.
+- Restart the Sendspin stream automatically when real PCM activity resumes.
+- Avoid a brief DAC ON/OFF pulse when switching a group to an already-silent source.
+
 ## 0.4.0
 
 MQTT control API and ioBroker integration reworked.
