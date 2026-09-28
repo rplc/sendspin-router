@@ -177,7 +177,11 @@ class SendspinBackend:
                 "stream": g.stream,
                 "playback_state": (
                     "playing"
-                    if (g.stream is not None and source_playing.get(g.stream, False))
+                    if (
+                        g.stream is not None
+                        and source_playing.get(g.stream, False)
+                        and not g.mute
+                    )
                     else "stopped"
                 ),
             }
@@ -301,6 +305,12 @@ class SendspinBackend:
         role = self._player_group_role(group_id)
         if role is not None:
             role.set_group_muted(mute)
+        # A fully muted group does not need an active Sendspin transport.
+        # Stopping it makes ESPHome reach IDLE and switch off the Louder DAC,
+        # while AudioRouter continues draining the selected FIFO. Unmuting
+        # restarts the transport if the source is still actually playing.
+        if group.stream is not None:
+            await self._sync_stream(group_id)
 
     async def set_client_volume(self, client_id: str, volume: int) -> None:
         for role in _player_roles(self._client(client_id)):
@@ -327,7 +337,7 @@ class SendspinBackend:
         for group_id, group in self.groups.items():
             if group.stream is None or group_id not in self._native_groups:
                 continue
-            playing = source_playing.get(group.stream, False)
+            playing = source_playing.get(group.stream, False) and not group.mute
             active = self._stream_active(group_id)
             if playing and not active:
                 await self._sync_stream(group_id)
@@ -466,6 +476,10 @@ class SendspinBackend:
             return
 
         current = self._streams.get(group_id)
+        if group.mute:
+            await self._stop_stream(group_id)
+            return
+
         if (
             group.stream in self._source_playing
             and not self._source_playing[group.stream]

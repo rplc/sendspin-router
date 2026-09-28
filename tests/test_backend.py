@@ -202,7 +202,7 @@ def test_group_playback_state_follows_source_activity():
 
 
 @pytest.mark.asyncio
-async def test_source_activity_changes_native_group_state_without_stopping_stream():
+async def test_source_activity_changes_native_group_state_and_stops_transport_on_silence():
     backend, server = _backend(
         groups=[GroupState(group_id="wohnzimmer", name="W", members=["a"], stream="spotify")]
     )
@@ -214,8 +214,32 @@ async def test_source_activity_changes_native_group_state_without_stopping_strea
 
     await backend.sync_playback_states({"spotify": False})
     assert a.group.state == "stopped"
-    assert not stream.is_stopped
+    assert stream.is_stopped
 
     await backend.sync_playback_states({"spotify": True})
     assert a.group.state == "playing"
-    assert not stream.is_stopped
+    assert backend._streams["wohnzimmer"].stream is not stream
+    assert not backend._streams["wohnzimmer"].stream.is_stopped
+
+
+@pytest.mark.asyncio
+async def test_group_mute_stops_and_unmute_restarts_transport():
+    backend, server = _backend(
+        groups=[GroupState(group_id="wohnzimmer", name="W", members=["a"], stream="spotify")]
+    )
+    a = server.add("a")
+    await backend.refresh()
+    await backend.set_group_stream("wohnzimmer", "spotify", source_playing=True)
+    stream = a.group.stream
+    assert stream is not None and not stream.is_stopped
+
+    await backend.set_group_mute("wohnzimmer", True)
+    assert backend.groups["wohnzimmer"].mute is True
+    assert stream.is_stopped
+    assert backend.list_groups({"spotify": True})["wohnzimmer"]["playback_state"] == "stopped"
+
+    await backend.set_group_mute("wohnzimmer", False)
+    restarted = backend._streams["wohnzimmer"].stream
+    assert restarted is not stream
+    assert not restarted.is_stopped
+    assert backend.list_groups({"spotify": True})["wohnzimmer"]["playback_state"] == "playing"

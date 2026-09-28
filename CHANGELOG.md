@@ -1,3 +1,16 @@
+## 0.5.4
+
+- Increase PCM silence timeout from 1 second to 60 seconds. A source is only
+  marked `playing=false` after one full minute below the stop threshold, so
+  normal Spotify track changes no longer power-cycle the Louder DACs.
+- Group mute now also stops the native Sendspin transport when the whole group
+  is muted, allowing ESPHome/Louder DACs to enter IDLE while the selected FIFO
+  continues to be drained.
+- Unmuting a group automatically restarts its Sendspin transport when the
+  selected source is still playing.
+- Group `playback_state` is reported as `stopped` while fully muted, even if
+  the selected source itself is still playing.
+
 ## 0.5.2
 
 - Synchronize the native Sendspin group `playback_state` with detected PCM source activity.

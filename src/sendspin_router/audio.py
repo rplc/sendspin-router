@@ -36,7 +36,7 @@ _ACTIVITY_SAMPLE_EVERY_FRAMES = 20
 _ACTIVITY_START_PEAK = 180   # ~-45 dBFS for signed 16-bit PCM
 _ACTIVITY_STOP_PEAK = 58     # ~-55 dBFS
 _ACTIVITY_START_S = 0.10
-_ACTIVITY_STOP_S = 1.00
+_ACTIVITY_STOP_S = 60.00
 
 
 def _fifo_path(uri: str) -> str:
