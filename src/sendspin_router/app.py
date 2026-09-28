@@ -80,6 +80,7 @@ class RouterApp:
                 if group.stream:
                     await self._route_group_stream(group.group_id, group.stream)
             await self.backend.refresh()
+            await self.backend.sync_playback_states(self.audio.playing_state())
         await self.mqtt.start()
         self._refresh_task = asyncio.create_task(self._refresh_loop(), name="refresh")
 
@@ -99,6 +100,7 @@ class RouterApp:
             try:
                 async with self._lock:
                     await self.backend.refresh()
+                    await self.backend.sync_playback_states(self.audio.playing_state())
                 await self.publish_state()
             except asyncio.CancelledError:
                 raise
@@ -110,6 +112,7 @@ class RouterApp:
             async with self._lock:
                 await self._dispatch(command, payload)
                 await self.backend.refresh()
+                await self.backend.sync_playback_states(self.audio.playing_state())
         except Exception as exc:
             _LOG.warning("MQTT command failed: %s %s: %s", command, payload, exc)
             await self.mqtt.publish_json(

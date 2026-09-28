@@ -313,6 +313,44 @@ class SendspinBackend:
         if client_id in self.clients:
             self.clients[client_id].mute = mute
 
+    async def sync_playback_states(self, source_playing: dict[str, bool]) -> None:
+        """Synchronize native Sendspin group state with source signal activity.
+
+        This deliberately changes only the group's logical playback state. The
+        PushStream stays alive so AudioRouter can keep draining the FIFO and
+        discard/fan out silence without restarting the Sendspin transport.
+        """
+        try:
+            from aiosendspin.models.types import PlaybackStateType
+        except ImportError:
+            _LOG.exception("aiosendspin PlaybackStateType is unavailable")
+            return
+
+        for group_id, group in self.groups.items():
+            native = self._native_groups.get(group_id)
+            if native is None or group.stream is None:
+                continue
+            desired = (
+                PlaybackStateType.PLAYING
+                if source_playing.get(group.stream, False)
+                else PlaybackStateType.STOPPED
+            )
+            current = getattr(native, "state", None)
+            if current == desired:
+                continue
+
+            setter = getattr(native, "_set_playback_state", None)
+            if setter is None:
+                raise RuntimeError(
+                    "aiosendspin SendspinGroup has no _set_playback_state(); "
+                    "cannot synchronize source playback without stopping the stream"
+                )
+            setter(desired)
+            _LOG.info(
+                "Group '%s' playback state -> %s (source '%s')",
+                group_id, desired.value, group.stream,
+            )
+
     async def set_group_stream(self, group_id: str, source_id: str | None) -> None:
         group = self._group(group_id)
         if source_id is not None and source_id not in self._sources:

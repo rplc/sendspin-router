@@ -1,3 +1,9 @@
+## 0.5.2
+
+- Synchronize the native Sendspin group `playback_state` with detected PCM source activity.
+- Keep the PushStream alive while a source is silent/stopped, so FIFO draining continues uninterrupted.
+- Send real Sendspin `group/update` state changes to clients without ending/restarting audio streams.
+
 ## 0.5.1
 
 - Group MQTT `playback_state` now follows the selected source's real `playing` state from the PCM activity detector. A configured but silent source reports `stopped`.
@@ -100,3 +106,4 @@ MQTT control API and ioBroker integration reworked.
 - Enable aiosendspin-managed initial/retry connections for configured static clients.
 - Cleanly stop group streams and the Sendspin server on shutdown.
 - Clear the in-memory client registry after shutdown.
+

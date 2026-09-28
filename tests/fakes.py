@@ -90,16 +90,25 @@ class FakeGroup:
         self.clients: list[FakeClient] = list(clients)
         self.stream: FakeStream | None = None
         self.role = FakePlayerGroupRole(self)
+        self.playback_state = "stopped"
         for client in clients:
             client.group = self
 
     def group_role(self, family: str):
         return self.role if family == "player" else None
 
+    @property
+    def state(self):
+        return self.playback_state
+
+    def _set_playback_state(self, state) -> None:
+        self.playback_state = getattr(state, "value", state)
+
     def start_stream(self) -> FakeStream:
         if self.stream is not None:
             self.stream.stop()
         self.stream = FakeStream()
+        self.playback_state = "playing"
         return self.stream
 
     async def stop(self) -> bool:
@@ -107,6 +116,7 @@ class FakeGroup:
             return False
         self.stream.stop()
         self.stream = None
+        self.playback_state = "stopped"
         return True
 
     async def add_client(self, client: FakeClient) -> None:

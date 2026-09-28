@@ -199,3 +199,23 @@ def test_group_playback_state_follows_source_activity():
     )
     assert backend.list_groups({"spotify": False})["wohnzimmer"]["playback_state"] == "stopped"
     assert backend.list_groups({"spotify": True})["wohnzimmer"]["playback_state"] == "playing"
+
+
+@pytest.mark.asyncio
+async def test_source_activity_changes_native_group_state_without_stopping_stream():
+    backend, server = _backend(
+        groups=[GroupState(group_id="wohnzimmer", name="W", members=["a"], stream="spotify")]
+    )
+    a = server.add("a")
+    await backend.refresh()
+    await backend.set_group_stream("wohnzimmer", "spotify")
+    stream = a.group.stream
+    assert stream is not None and not stream.is_stopped
+
+    await backend.sync_playback_states({"spotify": False})
+    assert a.group.state == "stopped"
+    assert not stream.is_stopped
+
+    await backend.sync_playback_states({"spotify": True})
+    assert a.group.state == "playing"
+    assert not stream.is_stopped
