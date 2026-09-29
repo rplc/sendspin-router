@@ -57,7 +57,8 @@ Logs:
 journalctl -u sendspin-router -f
 ```
 
-**Updates:**
+**Updates of final installation**
+
 ```bash
 source .venv/bin/activate
 .venv/bin/pip3 install -r requirements.lock
