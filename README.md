@@ -10,20 +10,10 @@ Headless Sendspin server/router for a Raspberry Pi, intended for an ioBroker-con
 - MQTT for state/events/commands
 - Sendspin clients discovered dynamically via Sendspin/mDNS
 - Configurable groups and PCM pipe sources
-- No GUI
-- No Music Assistant
 
 Python 3.13 is intentional: aiosendspin 9.1.1 explicitly supports Python 3.12 and 3.13.
 
 ## Install on the Pi
-
-Recommended development/deployment location for this setup:
-
-```text
-/home/pi/sendspin-router
-```
-
-This avoids needing `sudo` for normal `git pull`, configuration and virtual-environment work.
 
 ```bash
 cd ~
@@ -53,29 +43,29 @@ source .venv/bin/activate
 sendspin-router --help
 ```
 
+### Final installation/service
 
-### Source activity detection
+```bash
+sudo cp systemd/sendspin-router.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sendspin-router
+```
 
-`state/sources` now distinguishes two concepts:
+Logs:
 
-- `available`: PCM bytes are currently flowing from the upstream writer.
-- `playing`: a lightweight sampled peak detector sees actual audio activity.
+```bash
+journalctl -u sendspin-router -f
+```
 
-This matters for continuously running sources such as Spotify or Chromecast,
-which can keep writing silence into their FIFOs while paused. The detector
-checks only one frame out of every 20 and uses start/stop hysteresis, so it is
-designed to be negligible on a Raspberry Pi 3B+.
+**Updates:**
+```bash
+source .venv/bin/activate
+.venv/bin/pip3 install -r requirements.lock
+.venv/bin/pip3 install -e .
+sudo systemctl restart sendspin-router
+```
 
-### ioBroker volume profiles
-
-The ioBroker script contains optional per-group `VOLUME_PROFILES`. For example,
-`Balanced` uses normal Sendspin group volume, while `Kochen` and
-`Hintergrundbeschallung` can set individual client volumes. Client keys are
-Sendspin client IDs; on ESP clients these may be MAC addresses. Edit the
-`VOLUME_PROFILES` object at the top of `iobroker/sendspin-router.js` to match
-the actual clients and desired levels.
-
-## MQTT
+## MQTT API
 
 The router uses MQTT as its only control/state API. Base topic is
 configurable; default `sendspin/router`.
@@ -98,30 +88,12 @@ sendspin/router/command/client/bad-1/set_group        {"group":"wohnzimmer"}
 The router reconnects to the broker automatically, so restarting ioBroker
 does not interrupt audio. The full contract is in `docs/mqtt-api.md`.
 
-## Systemd
 
-The service file runs the application as user `pi` from `/home/pi/sendspin-router`.
+## Headless clients (e.g. ESP32 Louder Plus Boards)
 
-Install:
-
-```bash
-sudo cp systemd/sendspin-router.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now sendspin-router
-```
-
-Logs:
-
-```bash
-journalctl -u sendspin-router -f
-```
-
-## Headless clients (ESP "Louder Boards")
-
-The ESP Louder Board firmware has no GUI/app, so it can't initiate pairing
-or reliably show up via mDNS the way a phone/desktop client does. List such
-clients under `clients.static` in `config.yaml` (host/port + which group
-they belong to); the router connects to them on startup and auto-assigns
+The ESP Louder Board firmware has no GUI/app, so it can't initiate pairing.
+List such clients under `clients.static` in `config.yaml` (host/port + which
+group they belong to); the router connects to them on startup and auto-assigns
 them to that group as soon as they come online. Anything else the router
 sees falls back to `clients.default_group`, if set.
 
@@ -129,24 +101,21 @@ sees falls back to `clients.default_group`, if set.
 
 Each group has its own `stream` (see `docs/mqtt-api.md` — `set_stream`),
 and each group gets its own independent subscription to a source's PCM feed.
-That means "Wohnzimmer + Bad play Mopidy while Schlafzimmer plays Spotify"
-works out of the box, simultaneously — there's no single global source
-feeding everything.
+So different groups can play different sources and the same source can be
+played by different groups.
 
 The router reads every configured FIFO continuously, even while no group
 plays that source, and discards the unused audio, just like Snapserver did.
 Without that, a player such as Mopidy blocks as soon as its FIFO is full and
-appears to not play at all.
+appears to not play at all. Caution: ensure that only one server (i.e.
+sendspin-router) reads the FIFO queue. If Snapserver and sendspin-router read
+the same FIFO queue at the same time it will not work.
 
 Reads are paced to realtime (at most 0.2 s ahead of the audio clock). Players
 that write faster than realtime, e.g. Mopidy's GStreamer `filesink` or a radio
 stream catching up after a network stall, are throttled by the full pipe, so
 they can neither race through a playlist nor fill the Sendspin buffer far
 ahead of playback.
-
-### Source URIs
-
-The three configured source URIs are intentionally just the FIFO paths, e.g. `pipe:///run/snapserver/chromecast.pcm`. Sample format is represented separately in YAML, so the Snapserver query parameters are not needed by the router configuration.
 
 ### ioBroker
 

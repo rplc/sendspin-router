@@ -703,6 +703,10 @@ enqueue(async () => {
 
 schedule(CLIENT_CLEANUP_CRON, () => enqueue(cleanupVanishedClients));
 
+// ---------------------------------------------------------------------------
+// DEFAULTS (if stream ends)
+// ---------------------------------------------------------------------------
+
 const GROUP_DEFAULTS = {
         wohnzimmer: {
             Stream: 'spotify',
@@ -724,7 +728,7 @@ const GROUP_DEFAULTS = {
 
 on(playbackStateRegExp, (payload) => {
     if (payload.state.val === 'stopped') {
-        // Stream stoppen playing -> reset group to default
+        // Stream stopped playing -> reset group to default
         const match = payload.id.match(playbackStateRegExp),
             path = match && match[1],
             group = match && match[2],
