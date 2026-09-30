@@ -715,7 +715,7 @@ const GROUP_DEFAULTS = {
         },
         bad: {
             Stream: 'spotify',
-            Volume: 60,
+            Volume: 55,
             Mute: true
         },
         schlafzimmer: {
@@ -724,21 +724,44 @@ const GROUP_DEFAULTS = {
             Mute: true
         }
     },
-    playbackStateRegExp = new RegExp(`^(${ROOT}\\.Groups\\.(.+))\\.PlaybackState$`);
+    sourcePlayingRegExp = new RegExp(`^${ROOT}\.Sources\.(.+)\.Playing$`),
+    resetGroupsForStoppedSource = (sourceId) => {
+        let resetCount = 0;
 
-on(playbackStateRegExp, (payload) => {
-    if (payload.state.val === 'stopped') {
-        // Stream stopped playing -> reset group to default
-        const match = payload.id.match(playbackStateRegExp),
-            path = match && match[1],
-            group = match && match[2],
-            groupDefaults = group && GROUP_DEFAULTS[group];
+        for (const [groupId, group] of Object.entries(data.groups)) {
+            const groupDefaults = GROUP_DEFAULTS[groupId];
 
-        if (path && groupDefaults) {
-            log(`Playing stopped, resetting to defaults for ${path}`);
-            Object.keys(groupDefaults).forEach((key) => {
-                setState(`${path}.${key}`, groupDefaults[key]);
-            });
+            if (String(group.stream || '') !== sourceId || !groupDefaults) {
+                continue;
+            }
+
+            const path = `${ROOT}.Groups.${safe(groupId)}`;
+            log(`Source '${sourceId}' stopped, resetting group '${groupId}' to defaults`);
+
+            for (const [key, value] of Object.entries(groupDefaults)) {
+                setState(`${path}.${key}`, value);
+            }
+
+            resetCount++;
         }
+
+        if (!resetCount) {
+            log(`Source '${sourceId}' stopped, no group using this source needs a default reset`, 'debug');
+        }
+    };
+
+on(sourcePlayingRegExp, (payload) => {
+    if (payload.state.val) {
+        // Swtiched to playing -> not interesting
+        return;
     }
+
+    const match = payload.id.match(sourcePlayingRegExp),
+        sourceId = match && match[1];
+
+    if (!sourceId) {
+        return;
+    }
+
+    resetGroupsForStoppedSource(sourceId);
 });

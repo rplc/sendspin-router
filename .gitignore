@@ -6,3 +6,5 @@ __pycache__/
 .env
 config/config.yaml
 *.log
+data
+src/sendspin_router.egg-info
