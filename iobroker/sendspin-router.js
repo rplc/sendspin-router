@@ -709,6 +709,8 @@ schedule(CLIENT_CLEANUP_CRON, () => enqueue(cleanupVanishedClients));
 
 const GROUP_DEFAULTS = {
         wohnzimmer: {
+            // Keep the VolumeProfile before Volume, otherwise it might be reset/overwritten.
+            VolumeProfile: 'balanced',
             Stream: 'spotify',
             Volume: 60,
             Mute: false
